@@ -2,13 +2,13 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { migrate } from './migrations';
 import { defaults, type Job, type JobState, type PathMapping, type ScanResult, type Settings } from './types';
 
 const configDir = process.env.CONFIG_DIR || path.join(process.cwd(), 'config');
 fs.mkdirSync(configDir, { recursive: true });
 // Build workers must not contend for a persistent SQLite migration lock.
 const db = new Database(process.env.MG_BUILD === '1' ? ':memory:' : path.join(configDir, 'media-guard.db'));
-db.pragma('journal_mode = WAL');
 db.pragma('busy_timeout = 10000');
 const migrationSql = [
   'CREATE TABLE IF NOT EXISTS migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)',
@@ -19,8 +19,8 @@ const migrationSql = [
   'CREATE TABLE IF NOT EXISTS media_items(id TEXT PRIMARY KEY, source TEXT NOT NULL, arr_id INTEGER NOT NULL, title TEXT NOT NULL, path TEXT NOT NULL, identity TEXT, fingerprint TEXT, decision TEXT, last_scanned_at TEXT, action_state TEXT NOT NULL DEFAULT \'none\', UNIQUE(source,arr_id,path))',
   'CREATE TABLE IF NOT EXISTS quarantines(id TEXT PRIMARY KEY, original_path TEXT NOT NULL, quarantine_path TEXT NOT NULL, evidence TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, restored_at TEXT)'
 ];
-db.exec(migrationSql[0]);
-for (let i=1;i<=migrationSql.length;i+=1) if (!db.prepare('SELECT 1 FROM migrations WHERE version=?').get(i)) db.transaction(() => { db.exec(migrationSql[i-1]); db.prepare('INSERT INTO migrations VALUES(?,?)').run(i,new Date().toISOString()); })();
+migrate(db, migrationSql);
+db.pragma('journal_mode = WAL');
 export function getConfigDir(){ return configDir; }
 export function getSettings():Settings { const row=db.prepare('SELECT data FROM settings WHERE id=1').get() as {data:string}|undefined; return row ? {...defaults(),...JSON.parse(row.data)} : defaults(); }
 export function audit(type:string,detail:string,actor='system'){ db.prepare('INSERT INTO events(type,detail,actor,created_at) VALUES(?,?,?,?)').run(type,detail,actor,new Date().toISOString()); }
