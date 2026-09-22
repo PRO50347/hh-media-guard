@@ -1,0 +1,3 @@
+import { realpath } from 'node:fs/promises'; import path from 'node:path';
+export async function safeMediaPath(input:string, roots:string[]) { if (!path.isAbsolute(input) || input.includes('\0')) throw new Error('A valid absolute path is required'); const resolved=await realpath(input); if (!roots.some(root=>resolved===root || resolved.startsWith(root + path.sep))) throw new Error('File is outside configured media mappings'); return resolved; }
+export function safeRemoteUrl(value:string) { const u=new URL(value); if (!['http:','https:'].includes(u.protocol) || ['localhost','127.0.0.1','::1'].includes(u.hostname)) throw new Error('Only non-local HTTP(S) service URLs are permitted'); return u; }

@@ -1,0 +1,18 @@
+services:
+  media-guard:
+    build: .
+    image: ghcr.io/pro50347/hh-media-guard:latest
+    container_name: hh-media-guard
+    ports:
+      - "3938:3938"
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      - APP_NAME=${APP_NAME:-H&H Media Guard}
+      - SUITE_NAME=${SUITE_NAME:-H&H Suite}
+      - ALLOW_DESTRUCTIVE_ACTIONS=false
+      - MEDIA_ROOTS=/movies,/tv
+    volumes:
+      - ./config:/config
+      - ${MOVIES_PATH:-./sample-media}:/movies:ro
+      - ${TV_PATH:-./sample-media}:/tv:ro
+    restart: unless-stopped

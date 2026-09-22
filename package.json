@@ -1,0 +1,8 @@
+{
+  "name": "hh-media-guard", "version": "0.1.0", "private": false, "license": "MIT",
+  "description": "Safe, monitor-only audio language validation for Sonarr and Radarr media.",
+  "engines": {"node": ">=20"},
+  "scripts": {"dev":"next dev","build":"next build","start":"next start","lint":"eslint .","typecheck":"tsc --noEmit","test":"vitest run","test:integration":"vitest run tests/integration.test.ts","audit":"npm audit --audit-level=high","secrets":"node scripts/secret-scan.mjs"},
+  "dependencies": {"better-sqlite3":"^11.8.1","next":"^16.3.5","react":"^19.0.0","react-dom":"^19.0.0","zod":"^3.24.2"},
+  "devDependencies": {"@types/better-sqlite3":"^7.6.12","@types/node":"^20.17.30","@types/react":"^19.0.10","@types/react-dom":"^19.0.4","eslint":"^9.23.0","eslint-config-next":"^16.3.5","typescript":"^5.8.2","vitest":"^4.1.11"}
+}

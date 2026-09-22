@@ -1,0 +1,6 @@
+export type SafetyMode = 'monitor' | 'quarantine' | 'automatic';
+export type Decision = 'pass' | 'fail' | 'needs-analysis';
+export interface AudioTrack { index:number; codec:string; language:string; title?:string; duration?:number; channels?:number; layout?:string; isDefault:boolean; isCommentary:boolean; isDescriptive:boolean }
+export interface ScanResult { path:string; duration?:number; tracks:AudioTrack[]; decision:Decision; reason:string; scannedAt:string; fingerprint?:string }
+export interface Settings { suiteName:string; appName:string; shortName:string; accent:string; showSuite:boolean; requiredLanguages:string[]; allowDescriptive:boolean; ignoreCommentary:boolean; requireMainProgram:boolean; unknownBehavior:'needs-analysis'|'fail'; safetyMode:SafetyMode; retryLimit:number; webhookSecret?:string; setupComplete:boolean }
+export const defaults = (): Settings => ({ suiteName:process.env.SUITE_NAME || 'H&H Suite', appName:process.env.APP_NAME || 'H&H Media Guard', shortName:'Media Guard', accent:'#a78bfa', showSuite:true, requiredLanguages:['eng'], allowDescriptive:false, ignoreCommentary:true, requireMainProgram:true, unknownBehavior:'needs-analysis', safetyMode:'monitor', retryLimit:3, setupComplete:false });

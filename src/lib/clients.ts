@@ -1,0 +1,2 @@
+import { safeRemoteUrl } from './security';
+export class ArrClient { constructor(private baseUrl:string, private apiKey:string){} async testConnection(){const url=safeRemoteUrl(this.baseUrl); const response=await fetch(new URL('/api/v3/system/status',url),{headers:{'X-Api-Key':this.apiKey},signal:AbortSignal.timeout(8000)}); if(!response.ok) throw new Error(`Service responded ${response.status}`); const body=await response.json() as {version?:string}; return {ok:true,version:body.version||'unknown'}; } }

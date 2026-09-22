@@ -1,0 +1,3 @@
+const aliases: Record<string,string> = { en:'eng', eng:'eng', english:'eng', 'english (us)':'eng', es:'spa', spa:'spa', spanish:'spa', español:'spa', fr:'fra', fre:'fra', french:'fra', de:'deu', ger:'deu', german:'deu', ja:'jpn', jpn:'jpn', japanese:'jpn', und:'und', unknown:'und', '':'und' };
+export function normalizeLanguage(value?: string) { return aliases[(value || '').trim().toLowerCase()] || (value || '').trim().toLowerCase() || 'und'; }
+export function isCommentary(title?: string, disposition?: Record<string,number>) { return Boolean(disposition?.comment || /commentary|director.?s? comments?|cast commentary|audio description/i.test(title || '')); }
