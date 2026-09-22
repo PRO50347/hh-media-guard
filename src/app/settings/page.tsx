@@ -1,2 +1,9 @@
-import Link from 'next/link';import {getSettings} from '@/lib/store'; export const dynamic='force-dynamic';
-export default async function Settings(){const s=await getSettings();return <main className="simple"><Link href="/">← Dashboard</Link><h1>Settings · Appearance / Branding</h1><article className="card"><h2>Branding</h2><p>Suite: <b>{s.suiteName}</b><br/>Application: <b>{s.appName}</b><br/>Accent: <span style={{color:s.accent}}>{s.accent}</span></p><p className="muted">Brand assets are persisted under <code>/config/branding</code>. Upload endpoints intentionally accept only validated image formats in production deployments.</p></article><article className="card"><h2>Safety</h2><p><span className="badge pass">Monitor Only</span> is active. <code>ALLOW_DESTRUCTIVE_ACTIONS=false</code>; this v0.1 release does not expose file or Arr mutation actions.</p></article><article className="card"><h2>Connections & mappings</h2><p className="muted">Configure Sonarr/Radarr URLs, API keys, and path mappings through the setup API/UI extension points. API keys are write-only after storage.</p></article></main>}
+import Link from 'next/link';
+import { IntegrationSettings } from '@/components/IntegrationSettings';
+import { getSettings } from '@/lib/store';
+
+export const dynamic = 'force-dynamic';
+export default async function Settings() {
+  const settings = getSettings();
+  return <main className="simple"><Link href="/">← Dashboard</Link><h1>Settings</h1><IntegrationSettings id="sonarr"/><IntegrationSettings id="radarr"/><article className="card"><h2>Current safety policy</h2><p><span className="badge pass">{settings.safetyMode}</span> File and Arr mutation requires a non-monitor mode and <code>ALLOW_DESTRUCTIVE_ACTIONS=true</code>.</p></article></main>;
+}
