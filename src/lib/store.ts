@@ -38,4 +38,5 @@ export function integration(id:'sonarr'|'radarr'){const row=db.prepare('SELECT *
 export function saveIntegration(id:'sonarr'|'radarr',enabled:boolean,url:string,key?:string){db.prepare('INSERT INTO integrations(id,enabled,url,encrypted_key) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,url=excluded.url,encrypted_key=COALESCE(excluded.encrypted_key,integrations.encrypted_key)').run(id,Number(enabled),url,key||null);audit('integration',`${id} configuration updated`,'admin');}
 export function integrationKey(id:'sonarr'|'radarr'){return (db.prepare('SELECT encrypted_key FROM integrations WHERE id=?').get(id) as any)?.encrypted_key as string|undefined;}
 export function integrationResult(id:'sonarr'|'radarr',version?:string,error?:string){db.prepare('UPDATE integrations SET version=?,last_tested_at=?,last_error=? WHERE id=?').run(version||null,new Date().toISOString(),error||null,id);}
+export function acceptWebhook(digest:string){try{db.prepare('INSERT INTO webhook_receipts(id,digest,created_at) VALUES(?,?,?)').run(randomUUID(),digest,new Date().toISOString());return true;}catch{return false;}}
 export function raw(){return db;}
