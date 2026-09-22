@@ -1,8 +1,16 @@
-import { normalizeLanguage } from './language'; import type { AudioTrack, Decision, Settings } from './types';
+import { normalizeLanguage } from './language';
+import type { AudioTrack, Decision, Settings } from './types';
 export function decideAudio(duration:number|undefined, tracks:AudioTrack[], policy:Pick<Settings,'requiredLanguages'|'allowDescriptive'|'ignoreCommentary'|'requireMainProgram'|'unknownBehavior'>): {decision:Decision;reason:string} {
- const required=policy.requiredLanguages.map(normalizeLanguage); const substantial=(t:AudioTrack)=>!duration || !t.duration || t.duration >= duration*.75;
- const usable=tracks.filter(t => required.includes(normalizeLanguage(t.language)) && (!policy.ignoreCommentary || !t.isCommentary) && (policy.allowDescriptive || !t.isDescriptive) && (!policy.requireMainProgram || substantial(t)));
- if (usable.length) return {decision:'pass',reason:`Required audio verified: ${usable.map(x=>x.language).join(', ')}`};
- if (tracks.some(t=>normalizeLanguage(t.language)==='und')) return {decision:policy.unknownBehavior,reason:'Audio language metadata is unavailable; no acceptable main-program track can be verified.'};
- return {decision:'fail',reason:`No acceptable ${required.join('/')} main-program audio track was found.`};
+  if(!duration || !Number.isFinite(duration) || duration<=0 || tracks.length===0) {
+    return {decision:'needs-analysis',reason:'Program duration or audio evidence is unavailable.'};
+  }
+  const required=policy.requiredLanguages.map(normalizeLanguage).filter(language=>language!=='und');
+  const main=tracks.filter(track=>!track.isCommentary && (policy.allowDescriptive||!track.isDescriptive) && (!track.duration||track.duration>=duration*.9));
+  if(main.some(track=>required.includes(normalizeLanguage(track.language)))) {
+    return {decision:'pass',reason:`Required main-program audio verified: ${required.join(', ')}`};
+  }
+  if(!required.length || main.some(track=>normalizeLanguage(track.language)==='und')) {
+    return {decision:'needs-analysis',reason:'Main-program audio has unknown language metadata.'};
+  }
+  return {decision:'fail',reason:`No acceptable ${required.join('/')} main-program audio track was found.`};
 }

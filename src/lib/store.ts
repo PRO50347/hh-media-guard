@@ -19,7 +19,11 @@ const migrationSql = [
   'ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0; ALTER TABLE jobs ADD COLUMN run_after TEXT; ALTER TABLE jobs ADD COLUMN lease_until TEXT; UPDATE jobs SET run_after=created_at WHERE run_after IS NULL; CREATE INDEX IF NOT EXISTS jobs_claimable ON jobs(state,run_after)',
   'CREATE TABLE IF NOT EXISTS media_items(id TEXT PRIMARY KEY, source TEXT NOT NULL, arr_id INTEGER NOT NULL, title TEXT NOT NULL, path TEXT NOT NULL, identity TEXT, fingerprint TEXT, decision TEXT, last_scanned_at TEXT, action_state TEXT NOT NULL DEFAULT \'none\', UNIQUE(source,arr_id,path))',
   'CREATE TABLE IF NOT EXISTS quarantines(id TEXT PRIMARY KEY, original_path TEXT NOT NULL, quarantine_path TEXT NOT NULL, evidence TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, restored_at TEXT)',
-  'ALTER TABLE jobs ADD COLUMN lease_token TEXT'
+  'ALTER TABLE jobs ADD COLUMN lease_token TEXT',
+  `ALTER TABLE media_items ADD COLUMN details TEXT NOT NULL DEFAULT '{}';
+   CREATE TABLE attention(id TEXT PRIMARY KEY, subject TEXT UNIQUE NOT NULL, reason TEXT NOT NULL, evidence TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL);
+   ALTER TABLE jobs ADD COLUMN total INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE jobs ADD COLUMN processed INTEGER NOT NULL DEFAULT 0;`
 ];
 migrate(db, migrationSql);
 db.pragma('journal_mode = WAL');
@@ -56,3 +60,7 @@ export function createQuarantine(original:string,target:string,evidence:string){
 export function quarantine(id:string){return db.prepare('SELECT * FROM quarantines WHERE id=?').get(id) as {id:string;original_path:string;quarantine_path:string;evidence:string;state:string}|undefined;}
 export function restoreQuarantine(id:string){db.prepare("UPDATE quarantines SET state='restored',restored_at=? WHERE id=?").run(new Date().toISOString(),id);audit('quarantine',`Restored quarantine ${id}`);}
 export function raw(){return db;}
+export function needsAttention(subject:string,reason:string,evidence:unknown){
+  db.prepare("INSERT INTO attention(id,subject,reason,evidence,created_at) VALUES(?,?,?,?,?) ON CONFLICT(subject) DO UPDATE SET reason=excluded.reason,evidence=excluded.evidence,state='open'")
+    .run(randomUUID(),subject,reason,JSON.stringify(evidence),new Date().toISOString());
+}
