@@ -1,3 +1,13 @@
-'use client'; import {useState} from 'react'; import {useRouter} from 'next/navigation';
-const steps=['Welcome','Branding','Sonarr','Radarr','Mappings','Language policy','Safety mode','Test connections','Finish'];
-export default function Setup(){const [step,setStep]=useState(0),[appName,setAppName]=useState('H&H Media Guard'),[suite,setSuite]=useState('H&H Suite');const r=useRouter();async function finish(){await fetch('/api/setup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({appName,suiteName:suite,setupComplete:true,safetyMode:'monitor'})});r.push('/')}return <main className="wizard"><div className="wizard-brand">◈ {suite} <span>/ Media Guard</span></div><div className="steps">{steps.map((x,i)=><span className={i===step?'current':i<step?'done':''} key={x}>{i+1}. {x}</span>)}</div><article className="card"><p className="eyebrow">STEP {step+1} OF {steps.length}</p><h1>{steps[step]}</h1>{step===0&&<p>Welcome. Media Guard starts in Monitor Only mode and will never alter your media or Arr services until you deliberately opt in.</p>}{step===1&&<><label>Suite name<input value={suite} onChange={e=>setSuite(e.target.value)} maxLength={80}/></label><label>Application name<input value={appName} onChange={e=>setAppName(e.target.value)} maxLength={80}/></label><p className="muted">Logo, compact logo, favicon, accent, artwork, and sibling links can be changed later in Settings → Appearance.</p></>}{[2,3].includes(step)&&<p>Optional. Add the URL and API key in Settings. Keys are stored server-side and never returned to the browser.</p>}{step===4&&<p>Add one or more mappings, for example an Arr path <code>/data/tv</code> to container path <code>/tv</code>. All webhook paths are validated against these mappings.</p>}{step===5&&<p>English (<code>eng</code>) is required by default. Commentary and short bonus tracks are ignored; a main-program audio stream must substantially match program duration.</p>}{step===6&&<p><b>Monitor Only is locked as the safe default.</b> Quarantine and Automatic are reserved for a future release and require an explicit environment kill-switch.</p>}{step===7&&<p>Connection tests are available after credentials are entered. No test can perform destructive Arr calls.</p>}{step===8&&<p>You are ready to safely inspect media metadata.</p>}<div className="actions"><button disabled={!step} onClick={()=>setStep(step-1)}>Back</button>{step<8?<button className="button" onClick={()=>setStep(step+1)}>Continue</button>:<button className="button" onClick={finish}>Finish setup</button>}</div></article></main>}
+import { redirect } from "next/navigation";
+import { currentSession } from "@/lib/auth";
+import { getSettings } from "@/lib/store";
+import { SetupWizard } from "@/components/SetupWizard";
+export default async function Setup() {
+  if (!(await currentSession())) redirect("/login");
+  return (
+    <SetupWizard
+      settings={getSettings()}
+      destructiveEnabled={process.env.ALLOW_DESTRUCTIVE_ACTIONS === "true"}
+    />
+  );
+}

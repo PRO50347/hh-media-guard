@@ -4,3 +4,6 @@ config
 .env
 *.db
 coverage
+*.tsbuildinfo
+test-results
+playwright-report

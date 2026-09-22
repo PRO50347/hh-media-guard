@@ -1,5 +1,88 @@
-import Link from 'next/link'; import { redirect } from 'next/navigation'; import { currentSession } from '@/lib/auth'; import { getSettings, listScans, recentEvents, stats } from '@/lib/store';
-export const dynamic='force-dynamic';
-const nav=['Dashboard','Library','Movies','TV Shows','Needs Attention','Quarantine','Replacement Queue','History','Sonarr','Radarr','Settings'];
-export default async function Dashboard(){if(!await currentSession())redirect('/login');const [settings,scans,totals,events]=await Promise.all([getSettings(),Promise.resolve(listScans()),Promise.resolve(stats()),Promise.resolve(recentEvents())]);return <main className="shell" style={{'--accent':settings.accent} as React.CSSProperties}><aside><div className="logo"><span>◈</span><div>{settings.showSuite&&<small>{settings.suiteName}</small>}<strong>{settings.shortName}</strong></div></div><nav>{nav.map((n,i)=><Link className={i===0?'active':''} href={n==='Settings'?'/settings':n==='Library'?'/library':n==='History'?'/history':'/'} key={n}>{n}</Link>)}</nav><div className="mode">● MONITOR ONLY<br/><small>Destructive actions disabled</small></div></aside><section className="content"><header><div><p className="eyebrow">{settings.suiteName}</p><h1>{settings.appName}</h1></div><Link className="button" href="/library">Scan media</Link></header>{!settings.setupComplete&&<div className="notice">Finish secure setup to add Sonarr, Radarr, mappings, and policy. <Link href="/setup">Open setup wizard →</Link></div>}<div className="metrics"><Metric label="Total scanned" value={totals.total||0}/><Metric label="Verified" value={totals.pass||0} tone="pass"/><Metric label="Wrong language" value={totals.fail||0} tone="fail"/><Metric label="Needs analysis" value={totals.analysis||0} tone="warn"/></div><div className="grid"><article className="card"><h2>Library Health</h2><p className="muted">Audio validation is safe and metadata-first. Monitor Only never changes files or Arr state.</p><div className="health"><b>{totals.total?Math.round((totals.pass||0)/totals.total*100):0}%</b><span>verified</span></div></article><article className="card"><h2>Recent activity</h2>{events.length?events.map((e,i)=><p className="event" key={i}><span>{e.type}</span>{e.detail}</p>):<Empty text="No scans yet. Start with a single generated or mounted test file."/>}</article></div><article className="card table"><h2>Latest scans</h2>{scans.length?<table><thead><tr><th>File</th><th>Decision</th><th>Reason</th></tr></thead><tbody>{scans.slice(0,8).map(s=><tr key={s.fingerprint}><td>{s.path}</td><td><span className={'badge '+s.decision}>{s.decision}</span></td><td>{s.reason}</td></tr>)}</tbody></table>:<Empty text="Your scan history will appear here."/>}</article></section></main>}
-function Metric(p:{label:string;value:number;tone?:string}){return <article className={'metric '+(p.tone||'')}><span>{p.label}</span><b>{p.value}</b></article>} function Empty({text}:{text:string}){return <p className="muted empty">{text}</p>}
+import Link from "next/link";
+import { redirect } from "next/navigation";
+import { currentSession } from "@/lib/auth";
+import { getSettings, stats, recentEvents, raw } from "@/lib/store";
+export const dynamic = "force-dynamic";
+export default async function Dashboard() {
+  if (!(await currentSession())) redirect("/login");
+  const settings = getSettings();
+  const totals = stats();
+  const count = (sql: string) =>
+    (raw().prepare(sql).get() as { count: number }).count;
+  const metrics = [
+    ["Total scanned", totals.total],
+    ["Verified", totals.pass],
+    ["Wrong language", totals.fail],
+    ["Needs analysis", totals.analysis],
+    [
+      "Needs attention",
+      count("SELECT COUNT(*) count FROM attention WHERE state='open'"),
+    ],
+    [
+      "Quarantined",
+      count("SELECT COUNT(*) count FROM quarantines WHERE state='quarantined'"),
+    ],
+  ];
+  return (
+    <main>
+      <p className="eyebrow">
+        {settings.showSuite ? settings.suiteName : "Library health"}
+      </p>
+      <h1>{settings.appName}</h1>
+      {!settings.setupComplete && (
+        <p className="notice">
+          Complete your configuration in the{" "}
+          <Link href="/setup">setup wizard</Link>.
+        </p>
+      )}
+      <div className="metrics">
+        {metrics.map(([label, value]) => (
+          <article className="metric" key={label}>
+            <span>{label}</span>
+            <b>{value}</b>
+          </article>
+        ))}
+      </div>
+      <div className="actions">
+        <Link className="button" href="/library">
+          Scan media
+        </Link>
+        <Link className="button" href="/jobs">
+          View background jobs
+        </Link>
+      </div>
+      <section className="card">
+        <h2>Recent activity</h2>
+        {recentEvents().length ? (
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Type</th>
+                  <th>Activity</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentEvents()
+                  .slice(0, 15)
+                  .map((event, index) => (
+                    <tr key={index}>
+                      <td>{event.created_at}</td>
+                      <td>{event.type}</td>
+                      <td>{event.detail}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="empty">
+            No activity yet. Configure an integration or scan a mapped test
+            file.
+          </p>
+        )}
+      </section>
+    </main>
+  );
+}

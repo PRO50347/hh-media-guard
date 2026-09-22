@@ -1,54 +1,156 @@
-import { z } from 'zod';
-import { arrTransport, serviceUrl, type ArrTransport } from './arr-transport';
-import { getSettings } from './store';
+import { z } from "zod";
+import { arrTransport, serviceUrl, type ArrTransport } from "./arr-transport";
+import { getSettings } from "./store";
 
-const id=z.number().int().positive();
-const fileSchema=z.object({id,path:z.string().min(1),size:z.number().optional(),seriesId:id.optional(),movieId:id.optional(),relativePath:z.string().optional()});
-const seriesSchema=z.object({id,title:z.string(),path:z.string().optional()});
-const episodeSchema=z.object({id,seriesId:id,episodeFileId:z.number().int(),seasonNumber:z.number().int(),episodeNumber:z.number().int(),title:z.string()});
-const movieSchema=z.object({id,title:z.string(),year:z.number().optional(),hasFile:z.boolean().optional(),movieFile:fileSchema.optional()});
-const historySchema=z.object({id,eventType:z.string(),sourceTitle:z.string().optional(),downloadId:z.string().optional(),movieId:id.optional(),episodeId:id.optional(),data:z.record(z.string()).optional()});
-export type ArrFile=z.infer<typeof fileSchema>;
-export type ArrHistory=z.infer<typeof historySchema>;
-export type Series=z.infer<typeof seriesSchema>;
-export type Episode=z.infer<typeof episodeSchema>;
-export type Movie=z.infer<typeof movieSchema>;
-export interface ArrStatus {version:string;appName?:string}
+const id = z.number().int().positive();
+const fileSchema = z.object({
+  id,
+  path: z.string().min(1),
+  size: z.number().optional(),
+  seriesId: id.optional(),
+  movieId: id.optional(),
+  relativePath: z.string().optional(),
+});
+const seriesSchema = z.object({
+  id,
+  title: z.string(),
+  path: z.string().optional(),
+});
+const episodeSchema = z.object({
+  id,
+  seriesId: id,
+  episodeFileId: z.number().int(),
+  seasonNumber: z.number().int(),
+  episodeNumber: z.number().int(),
+  title: z.string(),
+});
+const movieSchema = z.object({
+  id,
+  title: z.string(),
+  year: z.number().optional(),
+  hasFile: z.boolean().optional(),
+  movieFile: fileSchema.optional(),
+});
+const historySchema = z.object({
+  id,
+  eventType: z.string(),
+  sourceTitle: z.string().optional(),
+  downloadId: z.string().optional(),
+  movieId: id.optional(),
+  episodeId: id.optional(),
+  data: z.record(z.string()).optional(),
+});
+export type ArrFile = z.infer<typeof fileSchema>;
+export type ArrHistory = z.infer<typeof historySchema>;
+export type Series = z.infer<typeof seriesSchema>;
+export type Episode = z.infer<typeof episodeSchema>;
+export type Movie = z.infer<typeof movieSchema>;
+export interface ArrStatus {
+  version: string;
+  appName?: string;
+}
 
 export class ArrClient {
-  constructor(private readonly baseUrl:string,private readonly apiKey:string,private readonly transport:ArrTransport=arrTransport) {}
-  protected async request(endpoint:string,method='GET',body?:unknown):Promise<unknown> {
-    if(method!=='GET' && (process.env.ALLOW_DESTRUCTIVE_ACTIONS!=='true'||getSettings().safetyMode!=='automatic'))throw new Error('Arr mutation is disabled in the current safety mode');
-    const base=serviceUrl(this.baseUrl);
-    base.pathname=`${base.pathname.replace(/\/$/,'')}/api/v3${endpoint.split('?')[0]}`;
-    base.search=endpoint.split('?')[1]||'';
-    return this.transport(base,this.apiKey,method,body);
+  constructor(
+    private readonly baseUrl: string,
+    private readonly apiKey: string,
+    private readonly transport: ArrTransport = arrTransport,
+  ) {}
+  protected async request(
+    endpoint: string,
+    method = "GET",
+    body?: unknown,
+  ): Promise<unknown> {
+    if (
+      method !== "GET" &&
+      (process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true" ||
+        getSettings().safetyMode !== "automatic")
+    )
+      throw new Error("Arr mutation is disabled in the current safety mode");
+    const base = serviceUrl(this.baseUrl);
+    base.pathname = `${base.pathname.replace(/\/$/, "")}/api/v3${endpoint.split("?")[0]}`;
+    base.search = endpoint.split("?")[1] || "";
+    return this.transport(base, this.apiKey, method, body);
   }
-  async testConnection():Promise<ArrStatus>{return z.object({version:z.string(),appName:z.string().optional()}).parse(await this.request('/system/status'));}
-  async history():Promise<ArrHistory[]> {
-    const result:ArrHistory[]=[];
-    for(let page=1;page<=100;page++) {
-      const data=z.object({records:z.array(historySchema),totalRecords:z.number()}).parse(await this.request(`/history?page=${page}&pageSize=100&sortKey=date&sortDirection=descending`));
-      result.push(...data.records);if(result.length>=data.totalRecords||!data.records.length)return result;
+  async testConnection(): Promise<ArrStatus> {
+    return z
+      .object({ version: z.string(), appName: z.string().optional() })
+      .parse(await this.request("/system/status"));
+  }
+  async history(): Promise<ArrHistory[]> {
+    const result: ArrHistory[] = [];
+    for (let page = 1; page <= 100; page++) {
+      const data = z
+        .object({ records: z.array(historySchema), totalRecords: z.number() })
+        .parse(
+          await this.request(
+            `/history?page=${page}&pageSize=100&sortKey=date&sortDirection=descending`,
+          ),
+        );
+      result.push(...data.records);
+      if (result.length >= data.totalRecords || !data.records.length)
+        return result;
     }
-    throw new Error('Arr history exceeds the supported page limit');
+    throw new Error("Arr history exceeds the supported page limit");
   }
-  async queue(){return this.request('/queue?pageSize=100');}
-  async command(name:string,payload:Record<string,unknown>={}){return this.request('/command','POST',{name,...payload});}
-  async markHistoryFailed(historyId:number){return this.request(`/history/failed/${id.parse(historyId)}`,'POST');}
+  async queue() {
+    return this.request("/queue?pageSize=100");
+  }
+  async command(name: string, payload: Record<string, unknown> = {}) {
+    return this.request("/command", "POST", { name, ...payload });
+  }
+  async markHistoryFailed(historyId: number) {
+    return this.request(`/history/failed/${id.parse(historyId)}`, "POST");
+  }
 }
 export class SonarrClient extends ArrClient {
-  async series(){return z.array(seriesSchema).parse(await this.request('/series'));}
-  async episodes(seriesId:number){return z.array(episodeSchema).parse(await this.request(`/episode?seriesId=${id.parse(seriesId)}`));}
-  async episodeFiles(seriesId:number){return z.array(fileSchema).parse(await this.request(`/episodefile?seriesId=${id.parse(seriesId)}`));}
-  async episodeFile(fileId:number){return fileSchema.parse(await this.request(`/episodefile/${id.parse(fileId)}`));}
-  async deleteEpisodeFile(fileId:number){return this.request(`/episodefile/${id.parse(fileId)}`,'DELETE');}
-  async searchEpisode(episodeIds:number[]){return this.command('EpisodeSearch',{episodeIds:z.array(id).min(1).parse(episodeIds)});}
+  async series() {
+    return z.array(seriesSchema).parse(await this.request("/series"));
+  }
+  async episodes(seriesId: number) {
+    return z
+      .array(episodeSchema)
+      .parse(await this.request(`/episode?seriesId=${id.parse(seriesId)}`));
+  }
+  async episodeFiles(seriesId: number) {
+    return z
+      .array(fileSchema)
+      .parse(await this.request(`/episodefile?seriesId=${id.parse(seriesId)}`));
+  }
+  async episodeFile(fileId: number) {
+    return fileSchema.parse(
+      await this.request(`/episodefile/${id.parse(fileId)}`),
+    );
+  }
+  async deleteEpisodeFile(fileId: number) {
+    return this.request(`/episodefile/${id.parse(fileId)}`, "DELETE");
+  }
+  async searchEpisode(episodeIds: number[]) {
+    return this.command("EpisodeSearch", {
+      episodeIds: z.array(id).min(1).parse(episodeIds),
+    });
+  }
 }
 export class RadarrClient extends ArrClient {
-  async movies(){return z.array(movieSchema).parse(await this.request('/movie'));}
-  async movieFiles(movieId:number){return z.array(fileSchema).parse(await this.request(`/moviefile?movieId=${id.parse(movieId)}`));}
-  async movieFile(fileId:number){return fileSchema.parse(await this.request(`/moviefile/${id.parse(fileId)}`));}
-  async deleteMovieFile(fileId:number){return this.request(`/moviefile/${id.parse(fileId)}`,'DELETE');}
-  async searchMovie(movieIds:number[]){return this.command('MoviesSearch',{movieIds:z.array(id).min(1).parse(movieIds)});}
+  async movies() {
+    return z.array(movieSchema).parse(await this.request("/movie"));
+  }
+  async movieFiles(movieId: number) {
+    return z
+      .array(fileSchema)
+      .parse(await this.request(`/moviefile?movieId=${id.parse(movieId)}`));
+  }
+  async movieFile(fileId: number) {
+    return fileSchema.parse(
+      await this.request(`/moviefile/${id.parse(fileId)}`),
+    );
+  }
+  async deleteMovieFile(fileId: number) {
+    return this.request(`/moviefile/${id.parse(fileId)}`, "DELETE");
+  }
+  async searchMovie(movieIds: number[]) {
+    return this.command("MoviesSearch", {
+      movieIds: z.array(id).min(1).parse(movieIds),
+    });
+  }
 }
