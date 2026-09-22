@@ -20,8 +20,9 @@ export function stopWorker() { stopping = true; if (timer) clearInterval(timer);
 async function tick() {
   if (stopping || running) return;
   running = true;
+  let claimed: ReturnType<typeof claimJob>;
   try {
-    const job = claimJob(workerId);
+    const job = claimed = claimJob(workerId);
     if (!job) return;
     if (job.kind === 'scan-library') { await runLibraryJob(job.id, JSON.parse(job.payload) as {source?:'sonarr'|'radarr'}); return; }
     if (job.kind !== 'scan-file') { updateJob(job.id,'needs-attention',100,undefined,'This job type is not available in this worker.'); return; }
@@ -35,8 +36,9 @@ async function tick() {
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown worker failure';
     // A job is only retried after a bounded delay; no destructive operation runs here.
-    const active = claimJob(workerId, 1);
-    if (active) retryJob(active.id,message);
+    // Retrying any newly claimed job here would violate ownership and could
+    // retry unrelated work. Only the job this tick leased may be changed.
+    if (claimed) retryJob(claimed.id,message);
   } finally { running = false; }
 }
 
