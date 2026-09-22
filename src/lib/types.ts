@@ -63,8 +63,8 @@ export interface PathMapping {
   enabled: boolean;
 }
 export interface Job {
-  total?:number;
-  processed?:number;
+  total?: number;
+  processed?: number;
   id: string;
   kind: "scan-file" | "scan-library" | "remediate";
   state: JobState;

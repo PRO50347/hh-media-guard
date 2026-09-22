@@ -7,6 +7,8 @@ import {
   rm,
   lstat,
   symlink,
+  link,
+  rename,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -70,6 +72,78 @@ function enable() {
   saveSettings({ safetyMode: "quarantine", quarantinePath: destination });
 }
 describe("durable quarantine and restore", () => {
+  it("refuses a source replaced after evidence validation", async () => {
+    const source = path.join(media, "replaced-source");
+    const target = path.join(destination, "replaced-target");
+    await writeFile(source, "original");
+    const identity = await lstat(source);
+    await rename(source, path.join(media, "saved-original"));
+    await writeFile(source, "replacement");
+    await expect(
+      moveExclusive(source, target, undefined, undefined, identity),
+    ).rejects.toThrow("Source changed");
+    expect(await readFile(source, "utf8")).toBe("replacement");
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+  it("never moves evidence for an already cancelled job", async () => {
+    const scan = await fixture();
+    enable();
+    const controller = new AbortController();
+    controller.abort(new Error("Job cancelled"));
+    await expect(moveToQuarantine(scan, controller.signal)).rejects.toThrow(
+      "Job cancelled",
+    );
+    expect((await lstat(scan.path)).isFile()).toBe(true);
+  });
+  it("retains the original if the created hardlink has the wrong identity", async () => {
+    const source = path.join(media, "identity-source");
+    const target = path.join(destination, "identity-target");
+    await writeFile(source, "original");
+    await expect(
+      moveExclusive(source, target, async (_source, targetPath) => {
+        await writeFile(targetPath, "imposter");
+      }),
+    ).rejects.toThrow("identity mismatch");
+    expect(await readFile(source, "utf8")).toBe("original");
+  });
+  it("pins source parents so a symlink swap cannot redirect removal", async () => {
+    const parent = path.join(media, "pinned-parent");
+    const renamed = path.join(media, "renamed-parent");
+    const unrelated = path.join(media, "unrelated-parent");
+    await mkdir(parent);
+    await mkdir(unrelated);
+    await writeFile(path.join(parent, "file"), "original");
+    await writeFile(path.join(unrelated, "file"), "unrelated");
+    const target = path.join(destination, "pinned-target");
+    await moveExclusive(
+      path.join(parent, "file"),
+      target,
+      async (sourcePath, targetPath) => {
+        await rename(parent, renamed);
+        await symlink(unrelated, parent);
+        await link(sourcePath, targetPath);
+      },
+    );
+    expect(await readFile(path.join(unrelated, "file"), "utf8")).toBe(
+      "unrelated",
+    );
+    expect(await readFile(target, "utf8")).toBe("original");
+    await expect(lstat(path.join(renamed, "file"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+  it("retains both copies when authorization is revoked before unlink", async () => {
+    const source = path.join(media, "revoked-source");
+    const target = path.join(destination, "revoked-target");
+    await writeFile(source, "original");
+    await expect(
+      moveExclusive(source, target, undefined, () => {
+        throw new Error("Runtime lease lost");
+      }),
+    ).rejects.toThrow("lease lost");
+    expect(await readFile(source, "utf8")).toBe("original");
+    expect(await readFile(target, "utf8")).toBe("original");
+  });
   it("Monitor Only never moves a failed file", async () => {
     const scan = await fixture();
     await expect(moveToQuarantine(scan)).rejects.toThrow("Explicit");

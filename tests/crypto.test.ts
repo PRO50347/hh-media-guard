@@ -28,4 +28,8 @@ describe("credential encryption", () => {
     const tampered = `${tag[0] === "A" ? "B" : "A"}${tag.slice(1)}`;
     expect(() => decryptSecret(`${iv}.${tampered}.${data}`)).toThrow();
   });
+  it("rejects base64 with ignored garbage instead of silently decoding it", () => {
+    process.env.ENCRYPTION_KEY = Buffer.alloc(32, 1).toString("base64") + "!!!";
+    expect(() => encryptSecret("fixture")).toThrow("32-byte");
+  });
 });

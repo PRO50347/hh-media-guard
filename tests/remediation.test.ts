@@ -80,6 +80,8 @@ function mock(
     redownload?: boolean;
     failSearch?: boolean;
     ambiguous?: boolean;
+    wrongFile?: boolean;
+    wrongCommand?: boolean;
   } = {},
 ) {
   const calls: { method: string; path: string; body: unknown }[] = [];
@@ -91,7 +93,7 @@ function mock(
       `/${identity.source === "sonarr" ? "episodefile" : "moviefile"}/${identity.fileId}`
     )
       return {
-        id: identity.fileId,
+        id: options.wrongFile ? identity.fileId + 1 : identity.fileId,
         path: identity.arrPath,
         movieId: identity.entityId,
         seriesId: identity.seriesId,
@@ -144,7 +146,8 @@ function mock(
         throw new Error("Ambiguous transport failure");
       return { id: 77 };
     }
-    if (endpoint === "/command/77") return { id: 77, status: "completed" };
+    if (endpoint === "/command/77")
+      return { id: options.wrongCommand ? 78 : 77, status: "completed" };
     if (endpoint === "/moviefile" || endpoint === "/episodefile") return [];
     if (endpoint === "/history/failed/2") return {};
     throw new Error(`Unexpected mock endpoint ${endpoint}`);
@@ -162,6 +165,22 @@ const operation = (fileId: number) =>
     error?: string;
   };
 describe("automatic remediation against contract mocks only", () => {
+  it("refuses an inconsistent file resource before moving or mutating anything", async () => {
+    const { scan, identity } = await fixture();
+    enable();
+    const { client, calls } = mock(identity, { wrongFile: true });
+    expect(await remediate(scan, identity, client)).toBe("needs-attention");
+    expect(calls.every((call) => call.method === "GET")).toBe(true);
+    expect((await lstat(scan.path)).isFile()).toBe(true);
+  });
+  it("does not reject or search after a mismatched reconciliation command", async () => {
+    const { scan, identity } = await fixture();
+    enable();
+    const { client, calls } = mock(identity, { wrongCommand: true });
+    expect(await remediate(scan, identity, client)).toBe("needs-attention");
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(operation(identity.fileId).state).toBe("needs-attention");
+  });
   for (const source of ["sonarr", "radarr"] as const)
     it(`${source}: quarantines, reconciles, rejects, searches once and verifies replacement`, async () => {
       const { scan, identity } = await fixture(source);
@@ -188,10 +207,30 @@ describe("automatic remediation against contract mocks only", () => {
         { ...identity, fileId: identity.fileId + 10000 },
       );
       expect(operation(identity.fileId).state).toBe("pending");
-      await runProcess('ffmpeg',['-v','error','-f','lavfi','-i','sine=frequency=440:duration=1','-metadata:s:a:0','language=eng','-c:a','flac',scan.path]);
-      const replacement=await scanFile(scan.path);saveScan(replacement);
-      const replacementIdentity={...identity,fileId:identity.fileId+10000};
-      await verifyReplacement(replacement,replacementIdentity,mock(replacementIdentity).client);
+      await runProcess("ffmpeg", [
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=1",
+        "-metadata:s:a:0",
+        "language=eng",
+        "-c:a",
+        "flac",
+        scan.path,
+      ]);
+      const replacement = await scanFile(scan.path);
+      saveScan(replacement);
+      const replacementIdentity = {
+        ...identity,
+        fileId: identity.fileId + 10000,
+      };
+      await verifyReplacement(
+        replacement,
+        replacementIdentity,
+        mock(replacementIdentity).client,
+      );
       expect(operation(identity.fileId).state).toBe("complete");
     });
   it("Monitor Only prohibits all remediation before any mock requests", async () => {

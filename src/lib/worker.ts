@@ -24,7 +24,7 @@ import { WorkerRunner } from "./worker-runner";
 import type { LeasedJob } from "./job-queue";
 import type { ScanResult } from "./types";
 import { moveToQuarantine } from "./quarantine";
-import { maintenance,recoverOperations } from './maintenance';
+import { maintenance, recoverOperations } from "./maintenance";
 import {
   remediate,
   verifyReplacement,
@@ -41,11 +41,11 @@ async function applyPolicy(
     return;
   if (process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true") {
     needsAttention(scan.path, "destructive actions disabled", { scan });
-    return;
+    return false;
   }
   try {
     if (getSettings().safetyMode === "quarantine") {
-      const id = await moveToQuarantine(scan);
+      const id = await moveToQuarantine(scan, signal);
       raw()
         .prepare(
           "UPDATE media_items SET action_state='quarantined' WHERE path=?",
@@ -55,14 +55,17 @@ async function applyPolicy(
     }
     if (!identity) {
       needsAttention(scan.path, "ambiguous Arr identity", { scan });
-      return;
+      return false;
     }
-    await remediate(scan, identity, undefined, signal);
+    return (
+      (await remediate(scan, identity, undefined, signal)) !== "needs-attention"
+    );
   } catch {
     needsAttention(scan.path, "quarantine failure", {
       scan,
       reason: "Inspect durable operation evidence before attempting recovery",
     });
+    return false;
   }
 }
 
@@ -121,6 +124,11 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
     const scan = await inspect(input, signal, payload.force);
     owns(job, signal);
     saveScan(scan);
+    raw()
+      .prepare(
+        "UPDATE media_items SET fingerprint=?,decision=?,last_scanned_at=? WHERE path=?",
+      )
+      .run(scan.fingerprint, scan.decision, scan.scannedAt, scan.path);
     const identity =
       payload.source && payload.entityId && payload.fileId && payload.arrPath
         ? {
@@ -132,7 +140,12 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
             downloadId: payload.downloadId,
           }
         : undefined;
-    await applyPolicy(scan, identity, signal);
+    if ((await applyPolicy(scan, identity, signal)) === false)
+      jobQueue.finish(
+        job,
+        "needs-attention",
+        "Policy action requires attention",
+      );
     if (scan.decision === "needs-analysis")
       needsAttention(input, "unknown language", scan);
   } catch (error) {
@@ -209,7 +222,7 @@ async function auditLibrary(
             .run(scan.fingerprint, scan.decision, scan.scannedAt, mediaId);
           if (scan.decision === "needs-analysis")
             needsAttention(mediaId, "unknown language", { item, scan });
-          await applyPolicy(scan, item, signal);
+          if ((await applyPolicy(scan, item, signal)) === false) failures++;
         }
       } catch (error) {
         signal.throwIfAborted();
@@ -235,14 +248,23 @@ async function auditLibrary(
 }
 
 const runner = new WorkerRunner(jobQueue, executeJob);
-let maintenanceTimer:ReturnType<typeof setInterval>|undefined;
+let maintenanceTimer: ReturnType<typeof setInterval> | undefined;
 export function startWorker() {
-  if (process.env.MG_BUILD !== "1"&&!maintenanceTimer){
-    recoverOperations();maintenance();runner.start();
-    maintenanceTimer=setInterval(()=>{try{maintenance();}catch{console.error(JSON.stringify({event:'maintenance.failed'}));}},60000);
+  if (process.env.MG_BUILD !== "1" && !maintenanceTimer) {
+    recoverOperations();
+    maintenance();
+    runner.start();
+    maintenanceTimer = setInterval(() => {
+      try {
+        maintenance();
+      } catch {
+        console.error(JSON.stringify({ event: "maintenance.failed" }));
+      }
+    }, 60000);
   }
 }
 export function stopWorker() {
-  clearInterval(maintenanceTimer);maintenanceTimer=undefined;
+  clearInterval(maintenanceTimer);
+  maintenanceTimer = undefined;
   return runner.stop();
 }

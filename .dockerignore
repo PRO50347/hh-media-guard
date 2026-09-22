@@ -4,3 +4,11 @@ node_modules
 config
 tests
 docs
+.env
+.env.*
+*.db
+*.db-wal
+*.db-shm
+*.tsbuildinfo
+test-results
+playwright-report

@@ -5,12 +5,18 @@ import https from "node:https";
 
 export function permittedServiceAddress(address: string) {
   let ip = address.toLowerCase();
-  if(isIP(ip)===6)ip=new URL(`http://[${ip}]`).hostname.slice(1,-1);
+  // Canonicalize IPv6 before applying prefix rules: expanded loopback and
+  // IPv4-mapped spellings must not bypass the same checks as compact forms.
+  if (isIP(ip) === 6) {
+    try {
+      ip = new URL(`http://[${ip}]`).hostname.slice(1, -1);
+    } catch {
+      return false;
+    }
+  }
   if (isIP(ip) === 4) {
     const parts = ip.split(".").map(Number);
     return (
-      /^(?:[23]|f[cd])/.test(ip) &&
-      !ip.startsWith('2002:') && !ip.startsWith('2001::') &&
       parts[0] !== 0 &&
       parts[0] !== 127 &&
       parts[0] < 224 &&
@@ -20,6 +26,10 @@ export function permittedServiceAddress(address: string) {
   }
   if (isIP(ip) === 6) {
     return (
+      /^(?:[23]|f[cd])/.test(ip) &&
+      !ip.startsWith("2002:") &&
+      !ip.startsWith("2001::") &&
+      !ip.startsWith("2001:0:") &&
       !ip.includes(".") &&
       !ip.startsWith("::") &&
       !/^fe[89ab]/.test(ip) &&

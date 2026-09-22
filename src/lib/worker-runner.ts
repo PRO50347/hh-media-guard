@@ -4,7 +4,7 @@ export class WorkerRunner {
   private active?: Promise<void>;
   private timer?: ReturnType<typeof setInterval>;
   private stopping = false;
-  private controller?:AbortController;
+  private controller?: AbortController;
   constructor(
     private readonly queue: JobQueue,
     private readonly execute: (
@@ -40,7 +40,7 @@ export class WorkerRunner {
     let claimed: LeasedJob | undefined;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     const controller = new AbortController();
-    this.controller=controller;
+    this.controller = controller;
     try {
       this.queue.recover();
       claimed = this.queue.claim();
@@ -61,15 +61,23 @@ export class WorkerRunner {
     } catch (error) {
       // Never call claim here: the failure belongs to exactly this lease.
       if (claimed) {
-        try {this.queue.fail(
-          claimed,
-          error instanceof Error ? error.message : "Worker failed",
-        );}catch{console.error(JSON.stringify({event:'worker.failure_persistence_failed',jobId:claimed.id}));}
-      }
-      else console.error(JSON.stringify({ event: "worker.claim_failed" }));
+        try {
+          this.queue.fail(
+            claimed,
+            error instanceof Error ? error.message : "Worker failed",
+          );
+        } catch {
+          console.error(
+            JSON.stringify({
+              event: "worker.failure_persistence_failed",
+              jobId: claimed.id,
+            }),
+          );
+        }
+      } else console.error(JSON.stringify({ event: "worker.claim_failed" }));
     } finally {
       clearInterval(heartbeat);
-      this.controller=undefined;
+      this.controller = undefined;
     }
   }
 }

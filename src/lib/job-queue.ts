@@ -19,8 +19,8 @@ type Row = {
   error?: string;
   created_at: string;
   updated_at: string;
-  total?:number;
-  processed?:number;
+  total?: number;
+  processed?: number;
 };
 
 function decode(row: Row): Job {
@@ -37,8 +37,8 @@ function decode(row: Row): Job {
     error: row.error,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    total:row.total||0,
-    processed:row.processed||0,
+    total: row.total || 0,
+    processed: row.processed || 0,
   };
 }
 

@@ -1,13 +1,20 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
-    if(process.env.MG_BUILD==='1')return;
-    const { validateEncryptionKey }=await import('./lib/crypto');
-    const { allowedOrigins }=await import('./lib/origin');
-    validateEncryptionKey();allowedOrigins();
-    const { startWorker,stopWorker } = await import("./lib/worker");
-    startWorker();
-    let stopping=false;
-    const shutdown=()=>{if(stopping)return;stopping=true;void stopWorker().then(()=>process.exit(0)).catch(()=>process.exit(1));};
-    process.once('SIGTERM',shutdown);process.once('SIGINT',shutdown);
+    if (process.env.MG_BUILD === "1") return;
+    try {
+      const { initializeRuntime } = await import("./lib/runtime");
+      await initializeRuntime();
+    } catch {
+      // Next may retain its listener after a rejected instrumentation hook.
+      // Fail closed without serializing exceptions containing configuration.
+      console.error(
+        JSON.stringify({
+          event: "startup.failed",
+          message:
+            "Check ENCRYPTION_KEY (32-byte base64), exact APP_URL/ALLOWED_ORIGINS, /config permissions, and exclusive runtime ownership. After a crash allow 30 seconds for lease expiry.",
+        }),
+      );
+      process.exit(1);
+    }
   }
 }

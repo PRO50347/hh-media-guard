@@ -154,12 +154,25 @@ describe("Arr network boundaries", () => {
     "::ffff:127.0.0.1",
     "fe80::1",
     "ff02::1",
+    "0:0:0:0:0:0:0:1",
+    "0:0:0:0:0:ffff:7f00:1",
+    "2002:7f00:1::",
+    "2001:0:1::1",
+    "64:ff9b::7f00:1",
+    "not-an-address",
   ])("blocks %s", (address) =>
     expect(permittedServiceAddress(address)).toBe(false),
   );
-  it.each(["10.1.2.3", "192.168.5.2", "172.18.0.3", "fd00::1234"])(
-    "allows explicitly configured LAN services %s",
-    (address) => expect(permittedServiceAddress(address)).toBe(true),
+  it.each([
+    "10.1.2.3",
+    "192.168.5.2",
+    "172.18.0.3",
+    "fd00::1234",
+    "fc00:0:0:0:0:0:0:1",
+    "2606:4700:4700::1111",
+    "8.8.8.8",
+  ])("allows explicitly configured LAN services %s", (address) =>
+    expect(permittedServiceAddress(address)).toBe(true),
   );
   it.each([
     "file:///tmp/test",

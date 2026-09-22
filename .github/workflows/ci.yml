@@ -12,7 +12,8 @@ jobs:
       - run: npm run audit
       - run: npm run secrets
       - run: npm run typecheck
-      - run: npm run lint
+      - run: npm run lint -- --max-warnings=0
       - run: npm test
-      - run: npm run build
+      - run: MG_BUILD=1 npm run build
       - run: docker build -t hh-media-guard:ci .
+      - run: MEDIA_GUARD_TEST_IMAGE=hh-media-guard:ci bash scripts/browser-gate.sh

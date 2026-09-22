@@ -14,7 +14,8 @@ import { moveToQuarantine } from "./quarantine";
 import { translateArrPath } from "./library";
 import { reserveReplacement } from "./retries";
 import type { ScanResult } from "./types";
-import { fingerprint } from './scanner';
+import { fingerprint } from "./scanner";
+import { requireRuntimeOwnership } from "./runtime-lease";
 
 export interface MediaIdentity {
   source: "sonarr" | "radarr";
@@ -26,6 +27,7 @@ export interface MediaIdentity {
 }
 type Client = SonarrClient | RadarrClient;
 function allowed() {
+  requireRuntimeOwnership();
   if (
     process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true" ||
     getSettings().safetyMode !== "automatic"
@@ -126,7 +128,14 @@ export async function remediate(
       now,
       now,
     ).changes;
-  if (!created) return;
+  if (!created) {
+    const existing = raw()
+      .prepare("SELECT state FROM operations WHERE operation_key=?")
+      .get(key) as { state: string };
+    return existing.state === "needs-attention"
+      ? "needs-attention"
+      : "duplicate";
+  }
   try {
     const client = provided || clientFor(identity.source);
     const current =
@@ -134,6 +143,7 @@ export async function remediate(
         ? await client.episodeFile(identity.fileId)
         : await client.movieFile(identity.fileId);
     if (
+      current.id !== identity.fileId ||
       current.path !== identity.arrPath ||
       translateArrPath(identity.source, current.path) !== scan.path ||
       (identity.source === "sonarr"
@@ -184,7 +194,7 @@ export async function remediate(
       .prepare("UPDATE operations SET release_key=? WHERE id=?")
       .run(releaseKey, id);
     state(id, "quarantining");
-    const quarantineId = await moveToQuarantine(scan);
+    const quarantineId = await moveToQuarantine(scan, signal);
     raw()
       .prepare("UPDATE operations SET quarantine_id=? WHERE id=?")
       .run(quarantineId, id);
@@ -209,6 +219,8 @@ export async function remediate(
     for (let attempt = 0; attempt < 30; attempt++) {
       signal.throwIfAborted();
       const result = await client.commandStatus(command.id);
+      if (result.id !== command.id)
+        throw new Error("Arr command identity is inconsistent");
       if (result.status === "completed") {
         complete = true;
         break;
@@ -232,6 +244,8 @@ export async function remediate(
     signal.throwIfAborted();
     if ((await client.downloadHandling()).autoRedownloadFailed)
       throw new Error("Arr redownload settings changed");
+    allowed();
+    signal.throwIfAborted();
     state(id, "blocklisting");
     await client.markHistoryFailed(release.id);
     step(id, "history-failed", { historyId: release.id });
@@ -252,6 +266,7 @@ export async function remediate(
         "UPDATE media_items SET action_state='pending' WHERE source=? AND arr_id=?",
       )
       .run(identity.source, identity.entityId);
+    return "pending";
   } catch (error) {
     state(id, "needs-attention");
     const safeError =
@@ -272,16 +287,55 @@ export async function remediate(
         "UPDATE media_items SET action_state='needs-attention' WHERE source=? AND arr_id=?",
       )
       .run(identity.source, identity.entityId);
+    return "needs-attention";
   }
 }
-export async function verifyReplacement(scan: ScanResult, identity: MediaIdentity,provided?:Client) {
+export async function verifyReplacement(
+  scan: ScanResult,
+  identity: MediaIdentity,
+  provided?: Client,
+) {
   if (scan.decision !== "pass") return;
-  if(!raw().prepare("SELECT 1 FROM operations WHERE source=? AND entity_id=? AND state='pending'").get(identity.source,identity.entityId))return;
-  const stored=raw().prepare("SELECT data FROM scans WHERE fingerprint=? AND decision='pass'").get(scan.fingerprint) as {data:string}|undefined;
-  if(!stored||JSON.parse(stored.data).path!==scan.path||await fingerprint(scan.path,getSettings())!==scan.fingerprint)throw new Error('Replacement evidence is missing or changed');
-  const client=provided||clientFor(identity.source);
-  const file=client instanceof SonarrClient?await client.episodeFile(identity.fileId):await client.movieFile(identity.fileId);
-  if(file.path!==identity.arrPath||translateArrPath(identity.source,file.path)!==scan.path||(identity.source==='sonarr'?file.seriesId!==identity.seriesId:file.movieId!==identity.entityId))throw new Error('Replacement identity is inconsistent');
+  if (
+    !raw()
+      .prepare(
+        "SELECT 1 FROM operations WHERE source=? AND entity_id=? AND state='pending'",
+      )
+      .get(identity.source, identity.entityId)
+  )
+    return;
+  const stored = raw()
+    .prepare("SELECT data FROM scans WHERE fingerprint=? AND decision='pass'")
+    .get(scan.fingerprint) as { data: string } | undefined;
+  if (
+    !stored ||
+    JSON.parse(stored.data).path !== scan.path ||
+    (await fingerprint(scan.path, getSettings())) !== scan.fingerprint
+  )
+    throw new Error("Replacement evidence is missing or changed");
+  const client = provided || clientFor(identity.source);
+  const file =
+    client instanceof SonarrClient
+      ? await client.episodeFile(identity.fileId)
+      : await client.movieFile(identity.fileId);
+  if (
+    file.id !== identity.fileId ||
+    file.path !== identity.arrPath ||
+    translateArrPath(identity.source, file.path) !== scan.path ||
+    (identity.source === "sonarr"
+      ? file.seriesId !== identity.seriesId
+      : file.movieId !== identity.entityId)
+  )
+    throw new Error("Replacement identity is inconsistent");
+  if (
+    client instanceof SonarrClient &&
+    !(await client.episodes(identity.seriesId!)).some(
+      (episode) =>
+        episode.id === identity.entityId &&
+        episode.episodeFileId === identity.fileId,
+    )
+  )
+    throw new Error("Replacement episode identity is inconsistent");
   const result = raw()
     .prepare(
       "UPDATE operations SET state='complete',updated_at=? WHERE source=? AND entity_id=? AND file_id<>? AND state='pending'",
@@ -292,9 +346,15 @@ export async function verifyReplacement(scan: ScanResult, identity: MediaIdentit
       identity.entityId,
       identity.fileId,
     );
-  if (result.changes)
+  if (result.changes) {
+    raw()
+      .prepare(
+        "UPDATE media_items SET action_state='none' WHERE source=? AND arr_id=?",
+      )
+      .run(identity.source, identity.entityId);
     audit(
       "replacement",
       `Verified replacement for ${identity.source}:${identity.entityId}`,
     );
+  }
 }

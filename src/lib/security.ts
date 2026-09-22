@@ -55,7 +55,12 @@ export async function safeMediaPath(input: string, roots: string[]) {
   const resolved = await realpath(lexical);
   let permitted = false;
   for (const root of candidates) {
-    if (within(await realpath(root), resolved)) permitted = true;
+    const canonical = await realpath(root);
+    if (canonical !== path.resolve(root))
+      throw new Error(
+        "Mapped root changed to a symlink; revalidate the mapping",
+      );
+    if (within(canonical, resolved)) permitted = true;
   }
   if (!permitted) throw new Error("File symlink escapes the mapped media root");
   if (!(await stat(resolved)).isFile())

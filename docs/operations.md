@@ -14,4 +14,4 @@ Check `/api/health`, ensure mounts are readable by the container user, confirm a
 
 ## Development / release
 
-Run `npm ci && npm run typecheck && npm run lint && npm test && npm run build`. The release workflow runs on semantic `v*` tags and publishes immutable GHCR tags plus `latest`.
+Use Node 20+ with ffmpeg installed. Run `npm ci`, `npm run typecheck`, `npm run lint -- --max-warnings=0`, `npm test`, and `MG_BUILD=1 npm run build`. `MG_BUILD` skips runtime initialization only during compilation; never set it on a running deployment. Runtime startup requires a valid `ENCRYPTION_KEY` and exact `APP_URL` origin. Build `docker build -t hh-media-guard:dev-gate .` and run `bash scripts/browser-gate.sh` for the isolated production browser/health gate. The script uses generated media and an internal Docker mock network, not live Arr services. Release workflows run these checks before publishing semantic tags; no release was authorized by the interrupted-work repair task.

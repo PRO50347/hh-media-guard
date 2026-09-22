@@ -40,7 +40,8 @@ export const migrationSql = [
    CREATE TABLE retry_titles(identity TEXT PRIMARY KEY,attempts INTEGER NOT NULL,next_at INTEGER NOT NULL,ignored INTEGER NOT NULL DEFAULT 0);
    CREATE TABLE retry_releases(identity TEXT PRIMARY KEY,title_identity TEXT NOT NULL,attempts INTEGER NOT NULL);
    CREATE TABLE operation_steps(id INTEGER PRIMARY KEY,operation_id TEXT NOT NULL,step TEXT NOT NULL,result TEXT NOT NULL,created_at TEXT NOT NULL);`,
-  'CREATE TABLE IF NOT EXISTS schedule_state(id INTEGER PRIMARY KEY CHECK(id=1),next_at INTEGER NOT NULL)',
+  "CREATE TABLE IF NOT EXISTS schedule_state(id INTEGER PRIMARY KEY CHECK(id=1),next_at INTEGER NOT NULL)",
+  "CREATE TABLE runtime_lease(id INTEGER PRIMARY KEY CHECK(id=1),owner TEXT NOT NULL,expires_at INTEGER NOT NULL)",
 ];
 migrate(db, migrationSql);
 db.pragma("journal_mode = WAL");

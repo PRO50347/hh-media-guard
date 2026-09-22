@@ -4,14 +4,16 @@ function key(): Buffer {
   const encoded = process.env.ENCRYPTION_KEY;
   if (!encoded)
     throw new Error(
-      "ENCRYPTION_KEY is required before saving integration credentials.",
+      "ENCRYPTION_KEY is required. Configure a stable 32-byte base64 value before starting Media Guard.",
     );
   const value = Buffer.from(encoded, "base64");
-  if (value.length !== 32)
+  if (value.length !== 32 || value.toString("base64") !== encoded)
     throw new Error("ENCRYPTION_KEY must be a 32-byte base64 value.");
   return value;
 }
-export function validateEncryptionKey(){key();}
+export function validateEncryptionKey() {
+  key();
+}
 
 export function encryptSecret(value: string): string {
   const iv = randomBytes(12);

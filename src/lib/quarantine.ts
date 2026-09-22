@@ -15,8 +15,10 @@ import { safeMediaPath, validAbsolute, within } from "./security";
 import { fingerprint } from "./scanner";
 import type { ScanResult } from "./types";
 import { decideAudio } from "./rules";
+import { requireRuntimeOwnership } from "./runtime-lease";
 
 function permitted() {
+  requireRuntimeOwnership();
   if (
     process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true" ||
     !["quarantine", "automatic"].includes(getSettings().safetyMode)
@@ -54,22 +56,65 @@ function same(
   );
 }
 
+// Linux directory descriptors pin both parents throughout a move. A renamed
+// parent or symlink swap must not redirect the final unlink or restore write.
+async function openDirectory(input: string) {
+  const resolved = validAbsolute(input);
+  let handle = await open("/", constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    for (const part of resolved.split("/").filter(Boolean)) {
+      const next = await open(
+        `/proc/self/fd/${handle.fd}/${part}`,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
+      await handle.close();
+      handle = next;
+    }
+    return handle;
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
 /** Exclusive destination creation never overwrites a replacement or existing restore target.
  * On any failure, retain both copies for recovery rather than deleting uncertain data. */
 export async function moveExclusive(
   source: string,
   target: string,
   linkFile = link,
+  beforeUnlink: () => void = () => {},
+  expectedSource?: { dev: number; ino: number; size: number; mtimeMs: number },
 ) {
-  const input = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const sourceParent = await openDirectory(path.dirname(source));
+  let targetParent: Awaited<ReturnType<typeof openDirectory>> | undefined;
+  let input: Awaited<ReturnType<typeof open>> | undefined;
   try {
+    targetParent = await openDirectory(path.dirname(target));
+    source = `/proc/self/fd/${sourceParent.fd}/${path.basename(source)}`;
+    target = `/proc/self/fd/${targetParent.fd}/${path.basename(target)}`;
+    // These are runtime media descriptors, never build-time application assets.
+    input = await open(
+      /* turbopackIgnore: true */ source,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
     const before = await input.stat();
+    if (expectedSource && !same(expectedSource, before))
+      throw new Error("Source changed after validation; original retained");
+    let targetIdentity: Awaited<ReturnType<typeof lstat>>;
     if (!before.isFile()) throw new Error("Source is not a regular file");
     try {
       await linkFile(source, target);
+      targetIdentity = await lstat(target);
+      if (!same(before, targetIdentity))
+        throw new Error("Hardlink identity mismatch; original retained");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
-      const output = await open(target, "wx", 0o600);
+      const output = await open(
+        /* turbopackIgnore: true */ target,
+        "wx",
+        0o600,
+      );
       try {
         const buffer = Buffer.alloc(1024 * 1024);
         let offset = 0;
@@ -96,6 +141,7 @@ export async function moveExclusive(
           offset += bytesRead;
         }
         await output.sync();
+        targetIdentity = await output.stat();
         if (offset !== before.size)
           throw new Error("Source changed during copy");
       } finally {
@@ -106,29 +152,30 @@ export async function moveExclusive(
     if (!same(before, after) || !same(before, await lstat(source)))
       throw new Error("Source identity changed; originals retained");
     const destination = await lstat(target);
-    if (!destination.isFile() || destination.size !== before.size)
+    if (
+      !destination.isFile() ||
+      destination.size !== before.size ||
+      !same(targetIdentity!, destination)
+    )
       throw new Error("Quarantine copy could not be verified");
     // Flush the new directory entry before removing the original entry.
-    const directory = await open(path.dirname(target), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
+    await targetParent.sync();
+    beforeUnlink();
     await unlink(source);
-    const sourceDirectory = await open(path.dirname(source), "r");
-    try {
-      await sourceDirectory.sync();
-    } finally {
-      await sourceDirectory.close();
-    }
+    await sourceParent.sync();
   } finally {
-    await input.close();
+    await input?.close();
+    await targetParent?.close();
+    await sourceParent.close();
   }
 }
 
-export async function moveToQuarantine(scan: ScanResult) {
-  permitted();
+export async function moveToQuarantine(scan: ScanResult, signal?: AbortSignal) {
+  const authorize = () => {
+    signal?.throwIfAborted();
+    permitted();
+  };
+  authorize();
   if (scan.decision !== "fail" || !scan.fingerprint)
     throw new Error("A conclusive, persisted failed scan is required");
   const stored = raw()
@@ -142,6 +189,7 @@ export async function moveToQuarantine(scan: ScanResult) {
   )
     throw new Error("Stored evidence is no longer conclusive");
   const original = await safeMediaPath(scan.path, roots());
+  const originalIdentity = await lstat(original);
   if ((await fingerprint(original, getSettings())) !== scan.fingerprint)
     throw new Error("Media or policy changed since scanning");
   const root = await quarantineRoot();
@@ -183,13 +231,19 @@ export async function moveToQuarantine(scan: ScanResult) {
       "An operation already exists for this evidence; inspect its recovery state",
     );
   try {
-    permitted();
+    authorize();
     if (
       (await quarantineRoot()) !== root ||
       (await safeMediaPath(original, roots())) !== original
     )
       throw new Error("Filesystem boundaries changed");
-    await moveExclusive(original, target);
+    await moveExclusive(
+      original,
+      target,
+      undefined,
+      authorize,
+      originalIdentity,
+    );
     raw()
       .prepare(
         "UPDATE quarantines SET state='quarantined' WHERE id=? AND state='moving'",
@@ -237,13 +291,21 @@ export async function restoreFromQuarantine(id: string) {
   if (!changed) throw new Error("Operation is already claimed");
   try {
     permitted();
-    await moveExclusive(item.quarantine_path, item.original_path);
+    await moveExclusive(
+      item.quarantine_path,
+      item.original_path,
+      undefined,
+      permitted,
+    );
     raw()
       .prepare(
         "UPDATE quarantines SET state='restored',restored_at=? WHERE id=?",
       )
       .run(new Date().toISOString(), id);
     audit("quarantine", `Restored ${id}`, "admin");
+    raw()
+      .prepare("UPDATE media_items SET action_state='none' WHERE path=?")
+      .run(item.original_path);
   } catch (error) {
     raw()
       .prepare("UPDATE quarantines SET state='needs-attention' WHERE id=?")
