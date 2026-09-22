@@ -23,6 +23,48 @@ import {
 import { WorkerRunner } from "./worker-runner";
 import type { LeasedJob } from "./job-queue";
 import type { ScanResult } from "./types";
+import { moveToQuarantine } from "./quarantine";
+import { maintenance,recoverOperations } from './maintenance';
+import {
+  remediate,
+  verifyReplacement,
+  type MediaIdentity,
+} from "./remediation";
+
+async function applyPolicy(
+  scan: ScanResult,
+  identity: MediaIdentity | undefined,
+  signal: AbortSignal,
+) {
+  if (identity) await verifyReplacement(scan, identity);
+  if (scan.decision !== "fail" || getSettings().safetyMode === "monitor")
+    return;
+  if (process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true") {
+    needsAttention(scan.path, "destructive actions disabled", { scan });
+    return;
+  }
+  try {
+    if (getSettings().safetyMode === "quarantine") {
+      const id = await moveToQuarantine(scan);
+      raw()
+        .prepare(
+          "UPDATE media_items SET action_state='quarantined' WHERE path=?",
+        )
+        .run(scan.path);
+      return id;
+    }
+    if (!identity) {
+      needsAttention(scan.path, "ambiguous Arr identity", { scan });
+      return;
+    }
+    await remediate(scan, identity, undefined, signal);
+  } catch {
+    needsAttention(scan.path, "quarantine failure", {
+      scan,
+      reason: "Inspect durable operation evidence before attempting recovery",
+    });
+  }
+}
 
 async function inspect(
   input: string,
@@ -56,6 +98,10 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
     source?: "sonarr" | "radarr";
     force?: boolean;
     arrPath?: string;
+    entityId?: number;
+    seriesId?: number;
+    fileId?: number;
+    downloadId?: string;
   };
   const input =
     payload.arrPath && payload.source
@@ -75,6 +121,18 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
     const scan = await inspect(input, signal, payload.force);
     owns(job, signal);
     saveScan(scan);
+    const identity =
+      payload.source && payload.entityId && payload.fileId && payload.arrPath
+        ? {
+            source: payload.source,
+            entityId: payload.entityId,
+            seriesId: payload.seriesId,
+            fileId: payload.fileId,
+            arrPath: payload.arrPath,
+            downloadId: payload.downloadId,
+          }
+        : undefined;
+    await applyPolicy(scan, identity, signal);
     if (scan.decision === "needs-analysis")
       needsAttention(input, "unknown language", scan);
   } catch (error) {
@@ -151,6 +209,7 @@ async function auditLibrary(
             .run(scan.fingerprint, scan.decision, scan.scannedAt, mediaId);
           if (scan.decision === "needs-analysis")
             needsAttention(mediaId, "unknown language", { item, scan });
+          await applyPolicy(scan, item, signal);
         }
       } catch (error) {
         signal.throwIfAborted();
@@ -176,9 +235,14 @@ async function auditLibrary(
 }
 
 const runner = new WorkerRunner(jobQueue, executeJob);
+let maintenanceTimer:ReturnType<typeof setInterval>|undefined;
 export function startWorker() {
-  if (process.env.MG_BUILD !== "1") runner.start();
+  if (process.env.MG_BUILD !== "1"&&!maintenanceTimer){
+    recoverOperations();maintenance();runner.start();
+    maintenanceTimer=setInterval(()=>{try{maintenance();}catch{console.error(JSON.stringify({event:'maintenance.failed'}));}},60000);
+  }
 }
 export function stopWorker() {
+  clearInterval(maintenanceTimer);maintenanceTimer=undefined;
   return runner.stop();
 }

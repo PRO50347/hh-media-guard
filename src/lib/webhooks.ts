@@ -47,6 +47,7 @@ const event = z.object({
   downloadId: z.string().max(512).optional(),
   movie: entity.optional(),
   series: entity.optional(),
+  episodes: z.array(entity).max(100).optional(),
   movieFile: file.optional(),
   episodeFile: file.optional(),
 });
@@ -110,7 +111,8 @@ export async function receiveWebhook(source: Source, request: Request) {
       const job = jobQueue.enqueue("scan-file", {
         source,
         arrPath: media.path,
-        entityId: title.id,
+        entityId: source === "sonarr" ? data.episodes?.[0]?.id : title.id,
+        seriesId: source === "sonarr" ? title.id : undefined,
         fileId: media.id,
         downloadId: data.downloadId,
       });

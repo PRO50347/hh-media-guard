@@ -14,12 +14,13 @@ WORKDIR /app
 ARG APP_VERSION=0.2.0
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="H&H Media Guard" org.opencontainers.image.description="Safe audio language validation" org.opencontainers.image.source="https://github.com/PRO50347/hh-media-guard" org.opencontainers.image.licenses="MIT" org.opencontainers.image.version="${APP_VERSION}" org.opencontainers.image.revision="${VCS_REF}"
-ENV NODE_ENV=production PORT=3938 HOSTNAME=0.0.0.0 CONFIG_DIR=/config ALLOW_DESTRUCTIVE_ACTIONS=false APP_VERSION=${APP_VERSION}
+ENV NODE_ENV=production PORT=3938 HOSTNAME=0.0.0.0 CONFIG_DIR=/config ALLOW_DESTRUCTIVE_ACTIONS=false APP_VERSION=${APP_VERSION} NEXT_MANUAL_SIG_HANDLE=true NEXT_TELEMETRY_DISABLED=1
 RUN apk add --no-cache ffmpeg wget && addgroup -S guard && adduser -S guard -G guard && mkdir /config && chown guard:guard /config
 COPY --from=build --chown=guard:guard /app/public ./public
 COPY --from=build --chown=guard:guard /app/.next/standalone ./
 COPY --from=build --chown=guard:guard /app/.next/static ./.next/static
+COPY --from=build --chown=guard:guard /app/scripts/config-backup.mjs ./scripts/config-backup.mjs
 USER guard
 EXPOSE 3938
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD wget -q -O /dev/null http://localhost:3938/api/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD wget -q -O /dev/null "http://127.0.0.1:${PORT}/api/health" || exit 1
 CMD ["node","server.js"]

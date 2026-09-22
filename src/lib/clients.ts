@@ -96,6 +96,16 @@ export class ArrClient {
   async queue() {
     return this.request("/queue?pageSize=100");
   }
+  async downloadHandling() {
+    return z
+      .object({ autoRedownloadFailed: z.boolean() })
+      .parse(await this.request("/config/downloadclient"));
+  }
+  async commandStatus(commandId: number) {
+    return z
+      .object({ id, status: z.string() })
+      .parse(await this.request(`/command/${id.parse(commandId)}`));
+  }
   async command(name: string, payload: Record<string, unknown> = {}) {
     return this.request("/command", "POST", { name, ...payload });
   }

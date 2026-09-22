@@ -7,7 +7,6 @@ import { JobQueue } from "./job-queue";
 import {
   defaults,
   type Job,
-  type JobState,
   type PathMapping,
   type ScanResult,
   type Settings,
@@ -37,6 +36,11 @@ export const migrationSql = [
    ALTER TABLE jobs ADD COLUMN processed INTEGER NOT NULL DEFAULT 0;`,
   "CREATE TABLE auth_attempts(id TEXT PRIMARY KEY,attempts INTEGER NOT NULL,expires_at INTEGER NOT NULL)",
   "CREATE TABLE webhook_tokens(source TEXT PRIMARY KEY,token_hash TEXT NOT NULL)",
+  `CREATE TABLE operations(id TEXT PRIMARY KEY,operation_key TEXT UNIQUE NOT NULL,source TEXT NOT NULL,entity_id INTEGER NOT NULL,file_id INTEGER NOT NULL,state TEXT NOT NULL,evidence TEXT NOT NULL,quarantine_id TEXT,release_key TEXT,error TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+   CREATE TABLE retry_titles(identity TEXT PRIMARY KEY,attempts INTEGER NOT NULL,next_at INTEGER NOT NULL,ignored INTEGER NOT NULL DEFAULT 0);
+   CREATE TABLE retry_releases(identity TEXT PRIMARY KEY,title_identity TEXT NOT NULL,attempts INTEGER NOT NULL);
+   CREATE TABLE operation_steps(id INTEGER PRIMARY KEY,operation_id TEXT NOT NULL,step TEXT NOT NULL,result TEXT NOT NULL,created_at TEXT NOT NULL);`,
+  'CREATE TABLE IF NOT EXISTS schedule_state(id INTEGER PRIMARY KEY CHECK(id=1),next_at INTEGER NOT NULL)',
 ];
 migrate(db, migrationSql);
 db.pragma("journal_mode = WAL");
@@ -143,95 +147,6 @@ export function roots() {
 export function createJob(kind: Job["kind"], payload: unknown) {
   return jobQueue.enqueue(kind, payload);
 }
-export function updateJob(
-  id: string,
-  state: JobState,
-  progress: number,
-  currentItem?: string,
-  error?: string,
-) {
-  db.prepare(
-    "UPDATE jobs SET state=?,progress=?,current_item=?,error=?,updated_at=? WHERE id=?",
-  ).run(
-    state,
-    progress,
-    currentItem || null,
-    error || null,
-    new Date().toISOString(),
-    id,
-  );
-}
-function mapJob(r: any): Job {
-  return {
-    id: r.id,
-    kind: r.kind,
-    state: r.state,
-    payload: r.payload,
-    progress: r.progress,
-    attempts: r.attempts || 0,
-    runAfter: r.run_after || r.created_at,
-    leaseUntil: r.lease_until,
-    currentItem: r.current_item,
-    error: r.error,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
-  };
-}
-export function getJob(id: string) {
-  const row = db.prepare("SELECT * FROM jobs WHERE id=?").get(id) as any;
-  return row ? mapJob(row) : undefined;
-}
-export function listJobs() {
-  return db
-    .prepare("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100")
-    .all()
-    .map(mapJob);
-}
-export function recoverStaleJobs() {
-  const now = new Date().toISOString();
-  return db
-    .prepare(
-      "UPDATE jobs SET state='retrying',lease_until=NULL,run_after=?,updated_at=?,error='Worker lease expired; safely requeued.' WHERE state='running' AND lease_until < ?",
-    )
-    .run(now, now, now).changes;
-}
-export function claimJob(workerId: string, leaseMs = 60000) {
-  const now = new Date();
-  const lease = new Date(now.getTime() + leaseMs).toISOString();
-  const row = db
-    .prepare(
-      "SELECT id FROM jobs WHERE state IN ('queued','retrying') AND run_after <= ? ORDER BY created_at LIMIT 1",
-    )
-    .get(now.toISOString()) as { id: string } | undefined;
-  if (!row) return undefined;
-  const changed = db
-    .prepare(
-      "UPDATE jobs SET state='running',lease_until=?,updated_at=? WHERE id=? AND state IN ('queued','retrying')",
-    )
-    .run(lease, now.toISOString(), row.id).changes;
-  return changed ? getJob(row.id) : undefined;
-}
-export function retryJob(id: string, error: string, maxAttempts = 3) {
-  const job = getJob(id);
-  if (!job) return;
-  const attempts = job.attempts + 1;
-  if (attempts >= maxAttempts) {
-    updateJob(id, "needs-attention", 100, job.currentItem, error);
-    db.prepare("UPDATE jobs SET attempts=? WHERE id=?").run(attempts, id);
-    audit("needs-attention", `Job ${id}: ${error}`);
-    return;
-  }
-  const delay = Math.min(3600000, 1000 * 2 ** attempts);
-  db.prepare(
-    "UPDATE jobs SET state='retrying',attempts=?,run_after=?,lease_until=NULL,error=?,updated_at=? WHERE id=?",
-  ).run(
-    attempts,
-    new Date(Date.now() + delay).toISOString(),
-    error,
-    new Date().toISOString(),
-    id,
-  );
-}
 export function integration(id: "sonarr" | "radarr") {
   const row = db
     .prepare("SELECT * FROM integrations WHERE id=?")
@@ -275,16 +190,6 @@ export function integrationResult(
     "UPDATE integrations SET version=?,last_tested_at=?,last_error=? WHERE id=?",
   ).run(version || null, new Date().toISOString(), error || null, id);
 }
-export function acceptWebhook(digest: string) {
-  try {
-    db.prepare(
-      "INSERT INTO webhook_receipts(id,digest,created_at) VALUES(?,?,?)",
-    ).run(randomUUID(), digest, new Date().toISOString());
-    return true;
-  } catch {
-    return false;
-  }
-}
 export function upsertMediaItem(item: {
   source: "sonarr" | "radarr";
   arrId: number;
@@ -321,24 +226,6 @@ export function listMediaItems(source?: "sonarr" | "radarr") {
     action_state: string;
   }[];
 }
-export function createQuarantine(
-  original: string,
-  target: string,
-  evidence: string,
-) {
-  const id = randomUUID();
-  db.prepare("INSERT INTO quarantines VALUES(?,?,?,?,?,?,?)").run(
-    id,
-    original,
-    target,
-    evidence,
-    "quarantined",
-    new Date().toISOString(),
-    null,
-  );
-  audit("quarantine", `Moved ${original} to quarantine`);
-  return id;
-}
 export function quarantine(id: string) {
   return db.prepare("SELECT * FROM quarantines WHERE id=?").get(id) as
     | {
@@ -349,12 +236,6 @@ export function quarantine(id: string) {
         state: string;
       }
     | undefined;
-}
-export function restoreQuarantine(id: string) {
-  db.prepare(
-    "UPDATE quarantines SET state='restored',restored_at=? WHERE id=?",
-  ).run(new Date().toISOString(), id);
-  audit("quarantine", `Restored quarantine ${id}`);
 }
 export function raw() {
   return db;

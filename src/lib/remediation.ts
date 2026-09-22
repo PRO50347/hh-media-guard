@@ -1,0 +1,300 @@
+import { createHash, randomUUID } from "node:crypto";
+import { z } from "zod";
+import { RadarrClient, SonarrClient, type ArrHistory } from "./clients";
+import {
+  raw,
+  getSettings,
+  needsAttention,
+  audit,
+  integration,
+  integrationKey,
+} from "./store";
+import { decryptSecret } from "./crypto";
+import { moveToQuarantine } from "./quarantine";
+import { translateArrPath } from "./library";
+import { reserveReplacement } from "./retries";
+import type { ScanResult } from "./types";
+import { fingerprint } from './scanner';
+
+export interface MediaIdentity {
+  source: "sonarr" | "radarr";
+  entityId: number;
+  seriesId?: number;
+  fileId: number;
+  arrPath: string;
+  downloadId?: string;
+}
+type Client = SonarrClient | RadarrClient;
+function allowed() {
+  if (
+    process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true" ||
+    getSettings().safetyMode !== "automatic"
+  )
+    throw new Error("Automatic remediation is disabled");
+}
+function clientFor(source: "sonarr" | "radarr"): Client {
+  const config = integration(source);
+  const key = integrationKey(source);
+  if (!config.enabled || !config.url || !key)
+    throw new Error("Integration is not configured");
+  return source === "sonarr"
+    ? new SonarrClient(config.url, decryptSecret(key))
+    : new RadarrClient(config.url, decryptSecret(key));
+}
+function state(id: string, value: string) {
+  raw()
+    .prepare("UPDATE operations SET state=?,updated_at=? WHERE id=?")
+    .run(value, new Date().toISOString(), id);
+}
+function step(id: string, name: string, result: unknown) {
+  // Record only expected response identifiers, never arbitrary server bodies.
+  raw()
+    .prepare(
+      "INSERT INTO operation_steps(operation_id,step,result,created_at) VALUES(?,?,?,?)",
+    )
+    .run(id, name, JSON.stringify(result), new Date().toISOString());
+  audit("remediation", `${id}: ${name}`);
+}
+function correlate(
+  history: ArrHistory[],
+  identity: MediaIdentity,
+  episodeIds: number[],
+) {
+  const related = (h: ArrHistory) =>
+    identity.source === "radarr"
+      ? h.movieId === identity.entityId
+      : Boolean(h.episodeId && episodeIds.includes(h.episodeId));
+  const imports = history.filter(
+    (h) =>
+      related(h) &&
+      h.eventType === "downloadFolderImported" &&
+      h.data?.droppedPath === identity.arrPath &&
+      (!identity.downloadId || h.downloadId === identity.downloadId),
+  );
+  const downloads = [
+    ...new Set(imports.map((h) => h.downloadId).filter(Boolean)),
+  ];
+  if (downloads.length !== 1)
+    throw new Error("Ambiguous imported release history");
+  const grabs = history.filter(
+    (h) => h.eventType === "grabbed" && h.downloadId === downloads[0],
+  );
+  if (
+    !grabs.length ||
+    grabs.some((h) => !related(h)) ||
+    grabs.some((h) => !h.sourceTitle) ||
+    new Set(grabs.map((h) => h.sourceTitle)).size !== 1
+  )
+    throw new Error("Ambiguous release identity or multi-title download");
+  return grabs[0];
+}
+
+/** Each non-idempotent external step is journaled BEFORE dispatch. An uncertain
+ * response is never retried automatically: the operation requires inspection. */
+export async function remediate(
+  scan: ScanResult,
+  identity: MediaIdentity,
+  provided?: Client,
+  signal = new AbortController().signal,
+) {
+  allowed();
+  if (scan.decision !== "fail" || !scan.fingerprint)
+    throw new Error("Conclusive failed evidence required");
+  const key = createHash("sha256")
+    .update(
+      JSON.stringify([
+        identity.source,
+        identity.entityId,
+        identity.fileId,
+        scan.fingerprint,
+      ]),
+    )
+    .digest("hex");
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const created = raw()
+    .prepare(
+      "INSERT OR IGNORE INTO operations(id,operation_key,source,entity_id,file_id,state,evidence,created_at,updated_at) VALUES(?,?,?,?,?,'planned',?,?,?)",
+    )
+    .run(
+      id,
+      key,
+      identity.source,
+      identity.entityId,
+      identity.fileId,
+      JSON.stringify({ scan, identity }),
+      now,
+      now,
+    ).changes;
+  if (!created) return;
+  try {
+    const client = provided || clientFor(identity.source);
+    const current =
+      client instanceof SonarrClient
+        ? await client.episodeFile(identity.fileId)
+        : await client.movieFile(identity.fileId);
+    if (
+      current.path !== identity.arrPath ||
+      translateArrPath(identity.source, current.path) !== scan.path ||
+      (identity.source === "sonarr"
+        ? current.seriesId !== identity.seriesId
+        : current.movieId !== identity.entityId)
+    )
+      throw new Error("Arr file identity does not match mapped evidence");
+    const episodeIds =
+      client instanceof SonarrClient
+        ? (await client.episodes(identity.seriesId!))
+            .filter((e) => e.episodeFileId === identity.fileId)
+            .map((e) => e.id)
+        : [];
+    if (
+      identity.source === "sonarr" &&
+      (episodeIds.length !== 1 || episodeIds[0] !== identity.entityId)
+    )
+      throw new Error(
+        "Single-episode identity is required; multi-episode files need manual attention",
+      );
+    // History failure can itself enqueue a search in Arr. Require that behavior
+    // disabled so Media Guard owns one durable search budget and command.
+    if ((await client.downloadHandling()).autoRedownloadFailed)
+      throw new Error(
+        "Disable Arr automatic failed-download redownload before using Automatic mode",
+      );
+    const release = correlate(await client.history(), identity, episodeIds);
+    const releaseKey = createHash("sha256")
+      .update(
+        JSON.stringify([
+          identity.source,
+          release.sourceTitle!.trim().toLowerCase(),
+        ]),
+      )
+      .digest("hex");
+    allowed();
+    signal.throwIfAborted();
+    const downloadKey = createHash("sha256")
+      .update(`${identity.source}:download:${release.downloadId}`)
+      .digest("hex");
+    reserveReplacement(
+      `${identity.source}:${identity.entityId}`,
+      releaseKey,
+      Date.now(),
+      [downloadKey],
+    );
+    raw()
+      .prepare("UPDATE operations SET release_key=? WHERE id=?")
+      .run(releaseKey, id);
+    state(id, "quarantining");
+    const quarantineId = await moveToQuarantine(scan);
+    raw()
+      .prepare("UPDATE operations SET quarantine_id=? WHERE id=?")
+      .run(quarantineId, id);
+    step(id, "quarantine", { quarantineId });
+    allowed();
+    signal.throwIfAborted();
+    state(id, "rescanning");
+    // Ask Arr to reconcile missing media, rather than DELETE a pathname that an
+    // independent importer might concurrently replace.
+    const command = z
+      .object({ id: z.number().int().positive() })
+      .parse(
+        await client.command(
+          identity.source === "sonarr" ? "RescanSeries" : "RescanMovie",
+          identity.source === "sonarr"
+            ? { seriesId: identity.seriesId }
+            : { movieId: identity.entityId },
+        ),
+      );
+    step(id, "rescan-command", { id: command.id });
+    let complete = false;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      signal.throwIfAborted();
+      const result = await client.commandStatus(command.id);
+      if (result.status === "completed") {
+        complete = true;
+        break;
+      }
+      if (["failed", "aborted", "cancelled"].includes(result.status))
+        throw new Error("Arr rescan failed");
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    if (!complete) throw new Error("Arr rescan timed out");
+    const remaining =
+      client instanceof SonarrClient
+        ? await client.episodeFiles(identity.seriesId!)
+        : await client.movieFiles(identity.entityId);
+    if (
+      remaining.some(
+        (file) => file.id === identity.fileId || file.path === identity.arrPath,
+      )
+    )
+      throw new Error("Arr still reports media at the original path");
+    allowed();
+    signal.throwIfAborted();
+    if ((await client.downloadHandling()).autoRedownloadFailed)
+      throw new Error("Arr redownload settings changed");
+    state(id, "blocklisting");
+    await client.markHistoryFailed(release.id);
+    step(id, "history-failed", { historyId: release.id });
+    allowed();
+    signal.throwIfAborted();
+    state(id, "searching");
+    const search = z
+      .object({ id: z.number().int().positive() })
+      .parse(
+        client instanceof SonarrClient
+          ? await client.searchEpisode(episodeIds)
+          : await client.searchMovie([identity.entityId]),
+      );
+    step(id, "replacement-search", { id: search.id });
+    state(id, "pending");
+    raw()
+      .prepare(
+        "UPDATE media_items SET action_state='pending' WHERE source=? AND arr_id=?",
+      )
+      .run(identity.source, identity.entityId);
+  } catch (error) {
+    state(id, "needs-attention");
+    const safeError =
+      error instanceof Error && error.message.startsWith("Arr ")
+        ? "Arr operation failed or returned inconsistent evidence"
+        : error instanceof Error
+          ? error.message
+          : "Remediation failed";
+    raw()
+      .prepare("UPDATE operations SET error=? WHERE id=?")
+      .run(safeError, id);
+    needsAttention(id, "replacement failure", {
+      operationId: id,
+      reason: safeError,
+    });
+    raw()
+      .prepare(
+        "UPDATE media_items SET action_state='needs-attention' WHERE source=? AND arr_id=?",
+      )
+      .run(identity.source, identity.entityId);
+  }
+}
+export async function verifyReplacement(scan: ScanResult, identity: MediaIdentity,provided?:Client) {
+  if (scan.decision !== "pass") return;
+  if(!raw().prepare("SELECT 1 FROM operations WHERE source=? AND entity_id=? AND state='pending'").get(identity.source,identity.entityId))return;
+  const stored=raw().prepare("SELECT data FROM scans WHERE fingerprint=? AND decision='pass'").get(scan.fingerprint) as {data:string}|undefined;
+  if(!stored||JSON.parse(stored.data).path!==scan.path||await fingerprint(scan.path,getSettings())!==scan.fingerprint)throw new Error('Replacement evidence is missing or changed');
+  const client=provided||clientFor(identity.source);
+  const file=client instanceof SonarrClient?await client.episodeFile(identity.fileId):await client.movieFile(identity.fileId);
+  if(file.path!==identity.arrPath||translateArrPath(identity.source,file.path)!==scan.path||(identity.source==='sonarr'?file.seriesId!==identity.seriesId:file.movieId!==identity.entityId))throw new Error('Replacement identity is inconsistent');
+  const result = raw()
+    .prepare(
+      "UPDATE operations SET state='complete',updated_at=? WHERE source=? AND entity_id=? AND file_id<>? AND state='pending'",
+    )
+    .run(
+      new Date().toISOString(),
+      identity.source,
+      identity.entityId,
+      identity.fileId,
+    );
+  if (result.changes)
+    audit(
+      "replacement",
+      `Verified replacement for ${identity.source}:${identity.entityId}`,
+    );
+}

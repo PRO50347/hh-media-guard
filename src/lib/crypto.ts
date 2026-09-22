@@ -11,6 +11,7 @@ function key(): Buffer {
     throw new Error("ENCRYPTION_KEY must be a 32-byte base64 value.");
   return value;
 }
+export function validateEncryptionKey(){key();}
 
 export function encryptSecret(value: string): string {
   const iv = randomBytes(12);

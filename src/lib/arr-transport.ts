@@ -4,10 +4,13 @@ import http from "node:http";
 import https from "node:https";
 
 export function permittedServiceAddress(address: string) {
-  const ip = address.toLowerCase();
+  let ip = address.toLowerCase();
+  if(isIP(ip)===6)ip=new URL(`http://[${ip}]`).hostname.slice(1,-1);
   if (isIP(ip) === 4) {
     const parts = ip.split(".").map(Number);
     return (
+      /^(?:[23]|f[cd])/.test(ip) &&
+      !ip.startsWith('2002:') && !ip.startsWith('2001::') &&
       parts[0] !== 0 &&
       parts[0] !== 127 &&
       parts[0] < 224 &&
