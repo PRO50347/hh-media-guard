@@ -2,7 +2,7 @@
 
 H&H Media Guard is a self-hosted companion for Sonarr and Radarr that validates downloaded media audio language metadata with `ffprobe`. It is designed to catch releases that lack usable required-language **main-program** audio—not merely an English commentary or short bonus track.
 
-> **v0.1.0 is Monitor Only.** It scans, records, and reports. It never deletes, moves, blocklists, searches, or changes Sonarr/Radarr state. `ALLOW_DESTRUCTIVE_ACTIONS=false` is the default and this release exposes no destructive endpoint.
+> **v0.2.0 defaults to Monitor Only.** It scans, records, and reports. Quarantine and Arr mutation remain intentionally unavailable in this release; no API route deletes or moves media.
 
 ## Install
 
@@ -19,11 +19,12 @@ Open `http://localhost:3938`, complete the setup wizard, and mount media read-on
 
 English (`eng`) is required by default. Language aliases such as `en` and `English` are normalized. Commentary/descriptive streams are excluded by default, and valid tracks must substantially match the program duration (75%) when duration metadata exists. Unknown or missing language metadata becomes **Needs analysis** rather than an unsafe failure. This metadata-based check does not prove spoken language; untagged or incorrectly tagged media needs review.
 
-## Features
+## Features actually available in v0.2
 
 - Dark responsive H&H Suite-style dashboard and first-run wizard.
-- Customizable suite/application names, accent, logo asset locations, favicon/artwork design points, and sibling links persisted in `/config` (environment names seed first run).
-- SQLite settings, scan history, events, fingerprints, and retry ledger with migrations-from-first-run schema.
+- Local administrator account, HttpOnly session cookie, password hashing, CSRF token checking, and exact origin allow-listing for write APIs.
+- SQLite settings, scan history, events, fingerprints, mappings, jobs, sessions, and migration ledger persisted under `/config`.
+- Authenticated path-mapping CRUD API and durable queued scan jobs.
 - Safe `ffprobe` process invocation; no shell construction from filenames.
 - Mapping-root file validation, signed webhook receiver, typed Arr connection client, idempotent fingerprints and rejection limits.
 - Docker image with ffmpeg, non-root runtime, healthcheck, and read-only media-mount examples.
@@ -42,7 +43,7 @@ Screenshots will be added after the initial public release. The dashboard is int
 
 ## Project status
 
-0.1.0 establishes safe monitoring, storage, metadata policy, and deployment foundations. Quarantine and automatic remediation are deliberately deferred until they can be independently audited and thoroughly tested.
+0.2.0 establishes secure monitor-only administration and durable jobs. Arr enumeration, branding uploads, quarantine/automatic remediation, and optional AI detection are explicitly deferred; they are not represented as working UI controls.
 
 ## License
 

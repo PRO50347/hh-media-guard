@@ -1,5 +1,5 @@
 {
-  "name": "hh-media-guard", "version": "0.1.0", "private": false, "license": "MIT",
+  "name": "hh-media-guard", "version": "0.2.0", "private": false, "license": "MIT",
   "description": "Safe, monitor-only audio language validation for Sonarr and Radarr media.",
   "engines": {"node": ">=20"},
   "scripts": {"dev":"next dev","build":"next build","start":"next start","lint":"eslint .","typecheck":"tsc --noEmit","test":"vitest run","test:integration":"vitest run tests/integration.test.ts","audit":"npm audit --audit-level=high","secrets":"node scripts/secret-scan.mjs"},
