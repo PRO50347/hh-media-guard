@@ -1,46 +1,29 @@
-import { claimJob, integration, integrationKey, recoverStaleJobs, retryJob, roots, saveScan, updateJob } from './store';
+import { integration, integrationKey, roots, saveScan, updateJob, jobQueue } from './store';
 import { safeMediaPath } from './security';
 import { scanFile } from './scanner';
 import { decryptSecret } from './crypto';
 import { RadarrClient, SonarrClient } from './clients';
 import { enumerateRadarr, enumerateSonarr } from './library';
+import { WorkerRunner } from './worker-runner';
 
-let timer: ReturnType<typeof setInterval> | undefined;
-let stopping = false;
-let running = false;
-const workerId = `process-${process.pid}`;
-
-export function startWorker() {
-  if (timer || process.env.MG_BUILD === '1') return;
-  recoverStaleJobs();
-  timer = setInterval(() => { void tick(); }, 750);
-  void tick();
-}
-export function stopWorker() { stopping = true; if (timer) clearInterval(timer); timer = undefined; }
-async function tick() {
-  if (stopping || running) return;
-  running = true;
-  let claimed: ReturnType<typeof claimJob>;
-  try {
-    const job = claimed = claimJob(workerId);
-    if (!job) return;
+const runner = new WorkerRunner(jobQueue, async (job, signal) => {
     if (job.kind === 'scan-library') { await runLibraryJob(job.id, JSON.parse(job.payload) as {source?:'sonarr'|'radarr'}); return; }
-    if (job.kind !== 'scan-file') { updateJob(job.id,'needs-attention',100,undefined,'This job type is not available in this worker.'); return; }
+    if (job.kind !== 'scan-file') { jobQueue.finish(job,'needs-attention','Unsupported job type.'); return; }
     const payload = JSON.parse(job.payload) as {path?:string};
     if (!payload.path) throw new Error('Job payload has no path.');
-    updateJob(job.id,'running',10,payload.path);
+    jobQueue.progress(job,10,payload.path);
     const file = await safeMediaPath(payload.path, roots());
     const scan = await scanFile(file);
+    signal.throwIfAborted();
+    if (!jobQueue.heartbeat(job)) return;
     saveScan(scan);
-    updateJob(job.id,'completed',100,file);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown worker failure';
-    // A job is only retried after a bounded delay; no destructive operation runs here.
-    // Retrying any newly claimed job here would violate ownership and could
-    // retry unrelated work. Only the job this tick leased may be changed.
-    if (claimed) retryJob(claimed.id,message);
-  } finally { running = false; }
+});
+
+export function startWorker() {
+  if (process.env.MG_BUILD === '1') return;
+  runner.start();
 }
+export function stopWorker() { return runner.stop(); }
 
 async function runLibraryJob(id:string,payload:{source?:'sonarr'|'radarr'}) {
   const sources=(payload.source?[payload.source]:['sonarr','radarr']) as ('sonarr'|'radarr')[];

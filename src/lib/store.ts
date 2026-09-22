@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { migrate } from './migrations';
+import { JobQueue } from './job-queue';
 import { defaults, type Job, type JobState, type PathMapping, type ScanResult, type Settings } from './types';
 
 const configDir = process.env.CONFIG_DIR || path.join(process.cwd(), 'config');
@@ -17,10 +18,12 @@ const migrationSql = [
   'CREATE UNIQUE INDEX IF NOT EXISTS jobs_deduplication ON jobs(kind, payload) WHERE state IN (\'queued\',\'running\')',
   'ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0; ALTER TABLE jobs ADD COLUMN run_after TEXT; ALTER TABLE jobs ADD COLUMN lease_until TEXT; UPDATE jobs SET run_after=created_at WHERE run_after IS NULL; CREATE INDEX IF NOT EXISTS jobs_claimable ON jobs(state,run_after)',
   'CREATE TABLE IF NOT EXISTS media_items(id TEXT PRIMARY KEY, source TEXT NOT NULL, arr_id INTEGER NOT NULL, title TEXT NOT NULL, path TEXT NOT NULL, identity TEXT, fingerprint TEXT, decision TEXT, last_scanned_at TEXT, action_state TEXT NOT NULL DEFAULT \'none\', UNIQUE(source,arr_id,path))',
-  'CREATE TABLE IF NOT EXISTS quarantines(id TEXT PRIMARY KEY, original_path TEXT NOT NULL, quarantine_path TEXT NOT NULL, evidence TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, restored_at TEXT)'
+  'CREATE TABLE IF NOT EXISTS quarantines(id TEXT PRIMARY KEY, original_path TEXT NOT NULL, quarantine_path TEXT NOT NULL, evidence TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, restored_at TEXT)',
+  'ALTER TABLE jobs ADD COLUMN lease_token TEXT'
 ];
 migrate(db, migrationSql);
 db.pragma('journal_mode = WAL');
+export const jobQueue = new JobQueue(db);
 export function getConfigDir(){ return configDir; }
 export function getSettings():Settings { const row=db.prepare('SELECT data FROM settings WHERE id=1').get() as {data:string}|undefined; return row ? {...defaults(),...JSON.parse(row.data)} : defaults(); }
 export function audit(type:string,detail:string,actor='system'){ db.prepare('INSERT INTO events(type,detail,actor,created_at) VALUES(?,?,?,?)').run(type,detail,actor,new Date().toISOString()); }
@@ -34,7 +37,7 @@ export function listMappings(){return db.prepare('SELECT * FROM mappings ORDER B
 export function addMapping(input:Omit<PathMapping,'id'>){const item={...input,id:randomUUID()};db.prepare('INSERT INTO mappings VALUES(?,?,?,?,?,?)').run(item.id,item.source,item.arrPath,item.containerPath,item.mediaType,Number(item.enabled));audit('mapping',`Added ${item.containerPath}`,'admin');return item;}
 export function deleteMapping(id:string){db.prepare('DELETE FROM mappings WHERE id=?').run(id);audit('mapping',`Removed ${id}`,'admin');}
 export function roots(){return listMappings().filter((m)=>m.enabled).map((m)=>m.containerPath);}
-export function createJob(kind:Job['kind'],payload:unknown){const now=new Date().toISOString();const body=JSON.stringify(payload);const existing=db.prepare("SELECT id FROM jobs WHERE kind=? AND payload=? AND state IN ('queued','running','retrying')").get(kind,body) as {id:string}|undefined;if(existing)return getJob(existing.id)!;const job:Job={id:randomUUID(),kind,state:'queued',payload:body,progress:0,attempts:0,runAfter:now,createdAt:now,updatedAt:now};db.prepare('INSERT INTO jobs(id,kind,state,payload,progress,attempts,run_after,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)').run(job.id,job.kind,job.state,job.payload,0,0,now,now,now);return job;}
+export function createJob(kind:Job['kind'],payload:unknown){ return jobQueue.enqueue(kind,payload); }
 export function updateJob(id:string,state:JobState,progress:number,currentItem?:string,error?:string){db.prepare('UPDATE jobs SET state=?,progress=?,current_item=?,error=?,updated_at=? WHERE id=?').run(state,progress,currentItem||null,error||null,new Date().toISOString(),id);}
 function mapJob(r:any):Job{return {id:r.id,kind:r.kind,state:r.state,payload:r.payload,progress:r.progress,attempts:r.attempts||0,runAfter:r.run_after||r.created_at,leaseUntil:r.lease_until,currentItem:r.current_item,error:r.error,createdAt:r.created_at,updatedAt:r.updated_at};}
 export function getJob(id:string){const row=db.prepare('SELECT * FROM jobs WHERE id=?').get(id) as any;return row?mapJob(row):undefined;}
