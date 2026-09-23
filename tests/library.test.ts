@@ -9,3 +9,27 @@ describe("Arr path translation", () => {
       translateArrPath("radarr", "/unmapped/../etc/passwd"),
     ).toBeUndefined());
 });
+
+it("stops enumeration between Arr requests when cancelled", async () => {
+  const { enumerateSonarr } = await import("../src/lib/library");
+  const controller = new AbortController();
+  let fileRequests = 0;
+  await expect(
+    enumerateSonarr(
+      {
+        series: async () => [{ id: 1, title: "fixture" }],
+        episodes: async () => {
+          controller.abort();
+          return [];
+        },
+        episodeFiles: async () => {
+          fileRequests++;
+          return [];
+        },
+      },
+      {},
+      controller.signal,
+    ),
+  ).rejects.toThrow();
+  expect(fileRequests).toBe(0);
+});

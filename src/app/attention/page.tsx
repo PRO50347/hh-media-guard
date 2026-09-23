@@ -6,7 +6,7 @@ export default async function Attention() {
   if (!(await currentSession())) redirect("/login");
   const items = raw()
     .prepare(
-      "SELECT * FROM attention WHERE state='open' ORDER BY created_at DESC LIMIT 500",
+      "SELECT * FROM attention ORDER BY CASE WHEN state='open' THEN 0 ELSE 1 END, created_at DESC LIMIT 500",
     )
     .all() as {
     id: string;

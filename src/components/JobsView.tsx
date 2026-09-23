@@ -45,7 +45,8 @@ export function JobsView() {
             aria-label={`Progress for ${job.id}`}
           />
           <p>
-            {job.progress}% · {job.currentItem}
+            {job.progress}% · {job.processed || 0} / {job.total || 0} items ·{" "}
+            {job.currentItem}
           </p>
           {job.error && <p className="error">{job.error}</p>}
           {["queued", "running", "retrying"].includes(job.state) && (

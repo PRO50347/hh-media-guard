@@ -25,11 +25,19 @@ export function MediaView({ items }: { items: Item[] }) {
   );
   async function rescan(rows: Item[]) {
     try {
-      for (const item of rows)
+      for (const item of rows) {
+        const details = item.details ? JSON.parse(item.details) : {};
         await api(
           "/api/jobs",
-          json("POST", { kind: "scan-file", path: item.path, force: true }),
+          json("POST", {
+            kind: "scan-library",
+            source: item.source,
+            entityId: item.arr_id,
+            seriesId: details.seriesId,
+            force: true,
+          }),
         );
+      }
       setMessage(`${rows.length} scan jobs queued`);
     } catch (e) {
       setMessage((e as Error).message);

@@ -9,6 +9,7 @@ import {
   verifyReplacement,
   type MediaIdentity,
 } from "../src/lib/remediation";
+import { resolveAttention } from "../src/lib/attention";
 import { reserveReplacement, resetReplacement } from "../src/lib/retries";
 import { addMapping, saveSettings, saveScan, raw } from "../src/lib/store";
 import { scanFile } from "../src/lib/scanner";
@@ -79,6 +80,7 @@ function mock(
   options: {
     redownload?: boolean;
     failSearch?: boolean;
+    failReject?: boolean;
     ambiguous?: boolean;
     wrongFile?: boolean;
     wrongCommand?: boolean;
@@ -149,7 +151,10 @@ function mock(
     if (endpoint === "/command/77")
       return { id: options.wrongCommand ? 78 : 77, status: "completed" };
     if (endpoint === "/moviefile" || endpoint === "/episodefile") return [];
-    if (endpoint === "/history/failed/2") return {};
+    if (endpoint === "/history/failed/2") {
+      if (options.failReject) throw new Error("Uncertain rejection response");
+      return {};
+    }
     throw new Error(`Unexpected mock endpoint ${endpoint}`);
   };
   const client =
@@ -226,6 +231,14 @@ describe("automatic remediation against contract mocks only", () => {
         ...identity,
         fileId: identity.fileId + 10000,
       };
+      await expect(
+        verifyReplacement(
+          replacement,
+          replacementIdentity,
+          mock(replacementIdentity, { wrongFile: true }).client,
+        ),
+      ).rejects.toThrow("identity");
+      expect(operation(identity.fileId).state).toBe("pending");
       await verifyReplacement(
         replacement,
         replacementIdentity,
@@ -266,6 +279,24 @@ describe("automatic remediation against contract mocks only", () => {
     const before = calls.length;
     await remediate(scan, identity, client);
     expect(calls).toHaveLength(before);
+  });
+  it("never searches after uncertain rejection, including after an administrator reset", async () => {
+    const { scan, identity } = await fixture();
+    enable();
+    const { client, calls } = mock(identity, { failReject: true });
+    expect(await remediate(scan, identity, client)).toBe("needs-attention");
+    expect(
+      calls.filter((call) => call.path === "/api/v3/command"),
+    ).toHaveLength(1);
+    const op = operation(identity.fileId);
+    const attention = raw()
+      .prepare("SELECT id FROM attention WHERE subject=?")
+      .get(op.id) as { id: string };
+    resolveAttention(attention.id, "reset", "fixture-admin");
+    const before = calls.length;
+    expect(await remediate(scan, identity, client)).toBe("needs-attention");
+    expect(calls).toHaveLength(before);
+    expect(operation(identity.fileId).state).toBe("needs-attention");
   });
   it("persists per-release aliases, title limits, backoff and deliberate reset", () => {
     enable();

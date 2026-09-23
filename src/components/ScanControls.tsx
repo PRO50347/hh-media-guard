@@ -37,7 +37,8 @@ export function ScanControls() {
             void queue({
               kind: "scan-library",
               source: source || undefined,
-              entityId: entity ? Number(entity) : undefined,
+              entityId:
+                source === "radarr" && entity ? Number(entity) : undefined,
               seriesId:
                 source === "sonarr" && entity ? Number(entity) : undefined,
               season: season ? Number(season) : undefined,

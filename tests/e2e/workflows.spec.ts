@@ -51,6 +51,30 @@ test("production administration, mapped audits, branding and safe restore", asyn
     await mappings.getByRole("button", { name: "Add mapping" }).click();
     await expect(mappings.getByRole("status")).toHaveText("Mapping saved");
   }
+  // Exercise mapping edit/disable/delete without changing fixture roots.
+  const tvMapping = mappings.getByRole("row").filter({ hasText: "/arr/tv" });
+  await tvMapping.getByRole("button", { name: "Edit", exact: true }).click();
+  await mappings.getByLabel("Enabled", { exact: true }).uncheck();
+  await mappings.getByRole("button", { name: "Update mapping" }).click();
+  await expect(tvMapping).toContainText("Disabled");
+  await tvMapping.getByRole("button", { name: "Edit", exact: true }).click();
+  await mappings.getByLabel("Enabled", { exact: true }).check();
+  await mappings.getByRole("button", { name: "Update mapping" }).click();
+  await expect(tvMapping).toContainText("Enabled");
+  await mappings.getByLabel("Arr-visible path").fill("/temporary");
+  await mappings.getByLabel("Container-visible path").fill("/tv");
+  await mappings.getByRole("button", { name: "Add mapping" }).click();
+  const temporary = mappings.getByRole("row").filter({ hasText: "/temporary" });
+  await expect(temporary).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await temporary.getByRole("button", { name: "Delete" }).click();
+  await expect(temporary).toHaveCount(0);
+  await page.getByRole("button", { name: "Add suite link" }).click();
+  const link = page.getByRole("group", { name: "Application 1" });
+  await link.getByLabel("name", { exact: true }).fill("Fixture Suite");
+  await link
+    .getByLabel("url", { exact: true })
+    .fill("https://suite.example.test/");
   await page
     .getByLabel("Application name", { exact: true })
     .fill("Fixture Media Inspector");
@@ -60,6 +84,10 @@ test("production administration, mapped audits, branding and safe restore", asyn
     .selectOption("light");
   await page.getByRole("button", { name: "Save appearance" }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByText("Suite applications", { exact: true }).click();
+  await expect(
+    page.getByRole("link", { name: /Fixture Suite/ }),
+  ).toHaveAttribute("href", "https://suite.example.test/");
   const png = await page.screenshot({
     clip: { x: 0, y: 0, width: 16, height: 16 },
   });
@@ -67,11 +95,38 @@ test("production administration, mapped audits, branding and safe restore", asyn
     .getByLabel("Compact / header logo")
     .setInputFiles({ name: "fixture.png", mimeType: "image/png", buffer: png });
   await expect(page.locator(".logo img")).toBeVisible();
+  for (const label of ["Main logo", "Favicon", "Login artwork"]) {
+    await page.getByLabel(label, { exact: true }).setInputFiles({
+      name: "fixture.png",
+      mimeType: "image/png",
+      buffer: png,
+    });
+    await expect(page.getByLabel(label, { exact: true })).toBeEnabled();
+  }
   await page.goto("/library");
   await page.getByRole("button", { name: "Start library audit" }).click();
   await expect(page.getByRole("status")).toContainText("Queued job");
   await page.goto("/jobs");
   await expect(page.getByText("completed", { exact: true })).toBeVisible();
+  // Series ID 10 differs from episode ID 11: this catches accidental episode filtering.
+  await page.goto("/library");
+  await page
+    .getByRole("combobox", { name: "Integration", exact: true })
+    .selectOption("sonarr");
+  await page.getByLabel("Series / movie ID (optional)").fill("10");
+  await page.getByLabel("Season (optional)").fill("1");
+  await page.getByRole("button", { name: "Start library audit" }).click();
+  await expect(page.getByRole("status")).toContainText("Queued job");
+  await expect
+    .poll(async () => {
+      const jobs = await page.evaluate(async () =>
+        (await fetch("/api/jobs")).json(),
+      );
+      return jobs.find(
+        (job: { payload: string }) => JSON.parse(job.payload).seriesId === 10,
+      );
+    })
+    .toMatchObject({ state: "completed", total: 1, processed: 1 });
   await page.goto("/movies");
   await expect(
     page.getByText("Generated English Movie", { exact: false }),
@@ -116,6 +171,32 @@ test("production administration, mapped audits, branding and safe restore", asyn
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Restore file" }).click();
   await expect(page.getByText("File restored", { exact: true })).toBeVisible();
+  await page.goto("/attention");
+  const unknown = page
+    .locator("section")
+    .filter({ has: page.getByRole("heading", { name: /unknown language/ }) })
+    .first();
+  page.once("dialog", (dialog) => dialog.accept());
+  await unknown.getByRole("button", { name: "Ignore", exact: true }).click();
+  await page.getByLabel("Attention status").selectOption("");
+  await expect(unknown).toContainText("ignored");
+  page.once("dialog", (dialog) => dialog.accept());
+  await unknown.getByRole("button", { name: "Reset title limits" }).click();
+  await expect(page.getByRole("status")).toHaveText("Action recorded");
+  await page.goto("/settings");
+  for (const source of ["Sonarr", "Radarr"]) {
+    const card = page.locator("section").filter({
+      has: page.getByRole("heading", { name: source, exact: true }),
+    });
+    page.once("dialog", (dialog) => dialog.accept());
+    await card.getByRole("button", { name: "Remove", exact: true }).click();
+    await expect(card.getByRole("status").first()).toHaveText(
+      "Integration removed",
+    );
+    await expect(
+      card.getByRole("button", { name: "Test connection" }),
+    ).toBeDisabled();
+  }
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Menu", exact: true }).click();
   await expect(page.getByRole("navigation", { name: "Primary" })).toBeVisible();

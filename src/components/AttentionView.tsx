@@ -14,6 +14,8 @@ export function AttentionView({
     state: string;
   }[];
 }) {
+  const [filter, setFilter] = useState("open");
+  const shown = items.filter((item) => !filter || item.state === filter);
   const [message, setMessage] = useState("");
   const router = useRouter();
   async function act(id: string, action: string) {
@@ -38,9 +40,24 @@ export function AttentionView({
         Uncertain results never authorize automatic media deletion.{" "}
         <Link href="/settings">Correct mappings or policy →</Link>
       </p>
+      <p>
+        Accept and Ignore pause automatic replacements for identified titles.
+        Reset clears title limits and that pause; it never repeats uncertain
+        external operations. Retry audits current Arr identity and respects
+        remaining limits.
+      </p>
       <p role="status">{message}</p>
-      {items.length ? (
-        items.map((item) => (
+      <label>
+        Attention status
+        <select value={filter} onChange={(e) => setFilter(e.target.value)}>
+          <option value="open">Open</option>
+          <option value="">All</option>
+          <option value="accepted">Accepted</option>
+          <option value="ignored">Ignored</option>
+        </select>
+      </label>
+      {shown.length ? (
+        shown.map((item) => (
           <section className="card" key={item.id}>
             <h2>
               {item.reason} <span className="badge">{item.state}</span>
@@ -53,6 +70,12 @@ export function AttentionView({
             <div className="actions">
               <button onClick={() => void act(item.id, "rescan")}>
                 Rescan
+              </button>
+              <button onClick={() => void act(item.id, "retry")}>
+                Retry title audit
+              </button>
+              <button onClick={() => void act(item.id, "reset")}>
+                Reset title limits
               </button>
               <button onClick={() => void act(item.id, "accept")}>
                 Manually accept

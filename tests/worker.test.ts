@@ -181,3 +181,39 @@ it("cancels active inspection promptly and never completes cancelled work", asyn
   expect(queue.get(queued.id)?.state).toBe("cancelled");
   await runner.stop();
 });
+
+it("shares durable claims across independent SQLite connections", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const directory = await mkdtemp(join(tmpdir(), "mg-queue-connections-"));
+  const first = new Database(join(directory, "jobs.db"));
+  first.exec(
+    (
+      db.prepare("SELECT sql FROM sqlite_master WHERE name='jobs'").get() as {
+        sql: string;
+      }
+    ).sql,
+  );
+  const second = new Database(join(directory, "jobs.db"));
+  try {
+    const a = new JobQueue(first, () => now);
+    const b = new JobQueue(second, () => now);
+    const queued = a.enqueue("scan-file", { path: "/shared-fixture" });
+    expect(b.enqueue("scan-file", { path: "/shared-fixture" }).id).toBe(
+      queued.id,
+    );
+    const old = a.claim()!;
+    expect(b.claim()).toBeUndefined();
+    now += 60001;
+    b.recover();
+    const recovered = b.claim()!;
+    expect(a.finish(old, "completed")).toBe(false);
+    expect(b.finish(recovered, "completed")).toBe(true);
+    expect(a.get(queued.id)?.state).toBe("completed");
+  } finally {
+    first.close();
+    second.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
