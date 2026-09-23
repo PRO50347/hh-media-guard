@@ -51,12 +51,17 @@ export function translateArrPath(
 export async function enumerateSonarr(
   client: Pick<SonarrClient, "series" | "episodes" | "episodeFiles">,
   scope: AuditScope = {},
+  signal?: AbortSignal,
 ): Promise<LibraryFile[]> {
   const result: LibraryFile[] = [];
+  signal?.throwIfAborted();
   for (const series of await client.series()) {
+    signal?.throwIfAborted();
     if (scope.seriesId && scope.seriesId !== series.id) continue;
     const episodes = await client.episodes(series.id);
+    signal?.throwIfAborted();
     const files = await client.episodeFiles(series.id);
+    signal?.throwIfAborted();
     const byId = new Map(files.map((file) => [file.id, file]));
     for (const episode of episodes) {
       if (
@@ -90,12 +95,16 @@ export async function enumerateSonarr(
 export async function enumerateRadarr(
   client: Pick<RadarrClient, "movies" | "movieFiles">,
   scope: AuditScope = {},
+  signal?: AbortSignal,
 ): Promise<LibraryFile[]> {
   const result: LibraryFile[] = [];
+  signal?.throwIfAborted();
   for (const movie of await client.movies()) {
+    signal?.throwIfAborted();
     if (scope.entityId && scope.entityId !== movie.id) continue;
     if (!movie.hasFile && !movie.movieFile) continue;
     const files = await client.movieFiles(movie.id);
+    signal?.throwIfAborted();
     for (const file of files) {
       if (file.movieId && file.movieId !== movie.id)
         throw new Error("Radarr file belongs to another movie");

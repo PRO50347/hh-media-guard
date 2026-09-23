@@ -54,10 +54,11 @@ export class WorkerRunner {
             controller.abort();
           }
         },
-        Math.max(10, Math.floor(this.queue.leaseMs / 3)),
+        Math.max(10, Math.min(250, Math.floor(this.queue.leaseMs / 3))),
       );
       await this.execute(owned, controller.signal);
       if (!controller.signal.aborted) this.queue.finish(owned, "completed");
+      else this.queue.fail(owned, "Worker stopped before completion");
     } catch (error) {
       // Never call claim here: the failure belongs to exactly this lease.
       if (claimed) {

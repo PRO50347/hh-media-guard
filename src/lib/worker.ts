@@ -119,6 +119,7 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
     );
     return;
   }
+  jobQueue.counts(job, 1, 0);
   jobQueue.progress(job, 10, input);
   try {
     const scan = await inspect(input, signal, payload.force);
@@ -140,6 +141,7 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
             downloadId: payload.downloadId,
           }
         : undefined;
+    jobQueue.counts(job, 1, 1);
     if ((await applyPolicy(scan, identity, signal)) === false)
       jobQueue.finish(
         job,
@@ -180,13 +182,19 @@ async function auditLibrary(
     const key = decryptSecret(encrypted);
     items.push(
       ...(source === "sonarr"
-        ? await enumerateSonarr(new SonarrClient(config.url, key), scope)
-        : await enumerateRadarr(new RadarrClient(config.url, key), scope)),
+        ? await enumerateSonarr(
+            new SonarrClient(config.url, key),
+            scope,
+            signal,
+          )
+        : await enumerateRadarr(
+            new RadarrClient(config.url, key),
+            scope,
+            signal,
+          )),
     );
   }
-  raw()
-    .prepare("UPDATE jobs SET total=? WHERE id=? AND lease_token=?")
-    .run(items.length, job.id, job.leaseToken);
+  jobQueue.counts(job, items.length, 0);
   let completed = 0;
   let failures = 0;
   for (const item of items) {
@@ -239,9 +247,7 @@ async function auditLibrary(
       Math.round((completed / items.length) * 100),
       item.title,
     );
-    raw()
-      .prepare("UPDATE jobs SET processed=? WHERE id=? AND lease_token=?")
-      .run(completed, job.id, job.leaseToken);
+    jobQueue.counts(job, items.length, completed);
   }
   if (failures)
     jobQueue.finish(job, "needs-attention", `${failures} items need attention`);

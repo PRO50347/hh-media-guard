@@ -158,6 +158,17 @@ export class JobQueue {
     );
   }
 
+  counts(job: LeasedJob, total: number, processed: number) {
+    return (
+      this.db
+        .prepare(
+          "UPDATE jobs SET total=?,processed=?,updated_at=? WHERE id=? AND state='running' AND lease_token=? AND lease_until>?",
+        )
+        .run(total, processed, this.now(), job.id, job.leaseToken, this.now())
+        .changes === 1
+    );
+  }
+
   finish(
     job: LeasedJob,
     state: "completed" | "needs-attention",

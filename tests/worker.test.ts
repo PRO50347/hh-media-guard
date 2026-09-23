@@ -9,7 +9,7 @@ let queue: JobQueue;
 beforeEach(() => {
   db = new Database(":memory:");
   db.exec(
-    "CREATE TABLE jobs(id TEXT PRIMARY KEY,kind TEXT,state TEXT,payload TEXT,progress INTEGER,attempts INTEGER,run_after TEXT,lease_until TEXT,lease_token TEXT,current_item TEXT,error TEXT,created_at TEXT,updated_at TEXT)",
+    "CREATE TABLE jobs(id TEXT PRIMARY KEY,kind TEXT,state TEXT,payload TEXT,progress INTEGER,attempts INTEGER,run_after TEXT,lease_until TEXT,lease_token TEXT,current_item TEXT,error TEXT,created_at TEXT,updated_at TEXT,total INTEGER,processed INTEGER)",
   );
   now = Date.now();
   queue = new JobQueue(db, () => now, 60000);
@@ -137,4 +137,47 @@ describe("worker ownership and recovery", () => {
     await runner.tick();
     expect(execute).toHaveBeenCalledTimes(1);
   });
+});
+
+it("persists progress counts and fences cancelled count updates", () => {
+  const queued = queue.enqueue("scan-file", { path: "/counts" });
+  const owned = queue.claim()!;
+  expect(queue.counts(owned, 10, 3)).toBe(true);
+  expect(queue.get(queued.id)).toMatchObject({ total: 10, processed: 3 });
+  queue.cancel(queued.id);
+  expect(queue.counts(owned, 10, 9)).toBe(false);
+});
+it("requeues cooperatively stopped work immediately for durable recovery", async () => {
+  const queued = queue.enqueue("scan-file", { path: "/shutdown" });
+  const runner = new WorkerRunner(queue, async (_, signal) => {
+    await new Promise<void>((resolve) =>
+      signal.addEventListener("abort", () => resolve(), { once: true }),
+    );
+  });
+  const running = runner.tick();
+  await runner.stop();
+  await running;
+  expect(queue.get(queued.id)?.state).toBe("retrying");
+});
+it("cancels active inspection promptly and never completes cancelled work", async () => {
+  const queued = queue.enqueue("scan-file", { path: "/cancel" });
+  let aborted = false;
+  const runner = new WorkerRunner(queue, async (_, signal) => {
+    await new Promise<void>((resolve) =>
+      signal.addEventListener(
+        "abort",
+        () => {
+          aborted = true;
+          resolve();
+        },
+        { once: true },
+      ),
+    );
+  });
+  const running = runner.tick();
+  queue.cancel(queued.id);
+  await running;
+  expect(aborted).toBe(true);
+  expect(queue.get(queued.id)?.state).toBe("cancelled");
+  await runner.stop();
 });
