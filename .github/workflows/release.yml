@@ -8,9 +8,15 @@ on:
         description: Existing annotated release tag to validate and publish
         required: true
         type: string
+      verify_only:
+        description: Run release validation and image build without publishing
+        required: false
+        default: false
+        type: boolean
 permissions: {contents: write, packages: write}
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  # All versions share latest and may share major/minor registry aliases.
+  group: media-guard-release-publication
   cancel-in-progress: false
 env:
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
@@ -42,6 +48,7 @@ jobs:
       - run: MEDIA_GUARD_TEST_IMAGE=hh-media-guard:release bash scripts/browser-gate.sh
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
+        if: ${{ !inputs.verify_only }}
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -60,7 +67,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ !inputs.verify_only }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
@@ -68,6 +75,7 @@ jobs:
             APP_VERSION=${{ steps.meta.outputs.version }}
             VCS_REF=${{ steps.source.outputs.sha }}
       - uses: softprops/action-gh-release@v2
+        if: ${{ !inputs.verify_only }}
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           body_path: CHANGELOG.md

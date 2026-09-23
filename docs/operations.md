@@ -33,3 +33,5 @@ Use Node 20+ and ffmpeg. Run `npm ci`, `npm run typecheck`, `npm run lint -- --m
 CI runs validation on pushes and pull requests. Release runs the gates again on annotated semantic version tags, checks package version, builds/publishes GHCR semantic tags and creates the GitHub Release. Release only after the authoritative `V0.2.0-TODO.md` gates pass; verify remote workflow conclusions, GitHub Release and registry manifests afterward. Published v0.1 tags/images must remain unchanged.
 
 If publication needs retrying, dispatch the Release workflow on `main` with the existing annotated tag as its `tag` input. The workflow fetches that exact remote tag object, verifies its commit and package version, and reruns all gates against tagged source. This avoids moving tags when repairing workflow-only failures.
+
+For workflow health verification, set the manual Release input `verify_only=true`. This runs tag identity/version checks, all tests, the isolated browser gate and the final image build, while skipping registry login/push and GitHub Release creation. Publication runs share one concurrency group across all versions because their major/minor/latest aliases overlap.
