@@ -56,5 +56,7 @@ it("does not expose untrusted response bodies in errors", async () => {
   });
   await expect(
     arrTransport(new URL("http://fixture.test"), "fixture-secret", "GET"),
-  ).rejects.toThrow(/^Arr request failed with HTTP 401$/);
+  ).rejects.toThrow(
+    /^Arr returned HTTP 401\. API key rejected; check the key\.$/,
+  );
 });

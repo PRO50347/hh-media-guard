@@ -41,6 +41,13 @@ export function IntegrationSettings({ id }: { id: "sonarr" | "radarr" }) {
   return (
     <section className="card">
       <h2>{id === "sonarr" ? "Sonarr" : "Radarr"}</h2>
+      <p className="muted">
+        Use your server LAN address and mapped port (Sonarr:
+        http://SERVER-IP:8989; Radarr: http://SERVER-IP:7878), or a container
+        name on a shared custom Docker network. localhost refers to Media Guard
+        itself. Include any configured URL base, such as /sonarr. Test before
+        saving; blank API key uses the saved key.
+      </p>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -99,15 +106,24 @@ export function IntegrationSettings({ id }: { id: "sonarr" | "radarr" }) {
             Save {id}
           </button>
           <button
-            disabled={busy || !config.apiKeyConfigured}
+            disabled={
+              busy || !config.url || (!apiKey && !config.apiKeyConfigured)
+            }
             type="button"
             onClick={() =>
               void run(async () => {
                 const result = await api<{ version: string }>(
                   `/api/integrations/${id}`,
-                  { method: "POST" },
+                  json("POST", {
+                    url: config.url,
+                    apiKey: apiKey || undefined,
+                  }),
                 );
-                setConfig(await api<Config>(`/api/integrations/${id}`));
+                setConfig({
+                  ...config,
+                  version: result.version,
+                  lastError: undefined,
+                });
                 setMessage(`Connected: ${result.version}`);
               })
             }

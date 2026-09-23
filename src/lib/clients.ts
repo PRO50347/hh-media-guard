@@ -1,3 +1,4 @@
+import { SafeError } from "./safe-error";
 import { z } from "zod";
 import { arrTransport, serviceUrl, type ArrTransport } from "./arr-transport";
 import { getSettings } from "./store";
@@ -68,14 +69,32 @@ export class ArrClient {
     )
       throw new Error("Arr mutation is disabled in the current safety mode");
     const base = serviceUrl(this.baseUrl);
-    base.pathname = `${base.pathname.replace(/\/$/, "")}/api/v3${endpoint.split("?")[0]}`;
+    base.pathname = `${base.pathname.replace(/\/+$/, "")}/api/v3${endpoint.split("?")[0]}`;
     base.search = endpoint.split("?")[1] || "";
     return this.transport(base, this.apiKey, method, body);
   }
-  async testConnection(): Promise<ArrStatus> {
-    return z
-      .object({ version: z.string(), appName: z.string().optional() })
-      .parse(await this.request("/system/status"));
+  async testConnection(expected?: "sonarr" | "radarr"): Promise<ArrStatus> {
+    const response = await this.request("/system/status");
+    const parsed = z
+      .object({
+        version: z
+          .string()
+          .max(64)
+          .regex(/^\d+\.\d+\.\d+(?:\.\d+)?$/),
+        appName: z.string(),
+      })
+      .safeParse(response);
+    if (!parsed.success)
+      throw new SafeError(
+        "arr.response",
+        "Unexpected or unsupported Arr API v3 status response; check the URL base/path and service version.",
+      );
+    if (expected && parsed.data.appName.toLowerCase() !== expected)
+      throw new SafeError(
+        "arr.service",
+        `Wrong service response; expected ${expected === "sonarr" ? "Sonarr" : "Radarr"}. Check the server URL and port.`,
+      );
+    return parsed.data;
   }
   async history(): Promise<ArrHistory[]> {
     const result: ArrHistory[] = [];

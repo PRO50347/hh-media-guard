@@ -46,7 +46,7 @@ wait_healthy() {
   return 1
 }
 wait_healthy
-test "$(docker exec "$fixture_app" id -u)" != 0
+docker exec "$fixture_app" awk '/^Uid:/ { if ($2 == 0 || $3 == 0) exit 1; found=1 } END { if (!found) exit 1 }' /proc/1/status
 docker run --rm --network "$fixture_network" -v "$PWD:/work" -w /work mcr.microsoft.com/playwright:v1.62.1-noble npx playwright test
 docker stop --time 30 "$fixture_app" >/dev/null
 test "$(docker inspect -f '{{.State.ExitCode}}' "$fixture_app")" = 0

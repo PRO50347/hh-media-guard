@@ -1,13 +1,26 @@
+import { validateConfig } from "./startup";
+import { SafeError } from "./safe-error";
 export async function initializeRuntime() {
   const { validateEncryptionKey } = await import("./crypto");
   const { allowedOrigins } = await import("./origin");
   validateEncryptionKey();
   allowedOrigins();
-  const { raw } = await import("./store");
+  validateConfig();
+  let store;
+  try {
+    store = await import("./store");
+  } catch {
+    throw new SafeError(
+      "database.open",
+      "Database cannot be opened or migrated. Check /config database permissions, free space and backup integrity.",
+    );
+  }
+  const { raw } = store;
   const { RuntimeLease, attachRuntimeLease } = await import("./runtime-lease");
   const lease = new RuntimeLease(raw());
   if (!lease.acquire())
-    throw new Error(
+    throw new SafeError(
+      "runtime.conflict",
       "Another Media Guard runtime owns /config. Stop it first, or wait 30 seconds after a crash.",
     );
   attachRuntimeLease(lease);

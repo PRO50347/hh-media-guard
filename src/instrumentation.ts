@@ -4,16 +4,9 @@ export async function register() {
     try {
       const { initializeRuntime } = await import("./lib/runtime");
       await initializeRuntime();
-    } catch {
-      // Next may retain its listener after a rejected instrumentation hook.
-      // Fail closed without serializing exceptions containing configuration.
-      console.error(
-        JSON.stringify({
-          event: "startup.failed",
-          message:
-            "Check ENCRYPTION_KEY (32-byte base64), exact APP_URL/ALLOWED_ORIGINS, /config permissions, and exclusive runtime ownership. After a crash allow 30 seconds for lease expiry.",
-        }),
-      );
+    } catch (error) {
+      const { startupFailure } = await import("./lib/startup");
+      console.error(JSON.stringify(startupFailure(error)));
       process.exit(1);
     }
   }

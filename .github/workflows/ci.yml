@@ -8,8 +8,9 @@ jobs:
       - uses: actions/setup-node@v4
         with: {node-version: 20, cache: npm}
       - run: npm ci
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg python3 openssl ripgrep
       - run: node scripts/release-check.mjs
+      - run: python3 scripts/check-unraid.py
       - run: git diff --check
       - run: npm run audit
       - run: npm run secrets
@@ -19,3 +20,4 @@ jobs:
       - run: MG_BUILD=1 npm run build
       - run: docker build -t hh-media-guard:ci .
       - run: MEDIA_GUARD_TEST_IMAGE=hh-media-guard:ci bash scripts/browser-gate.sh
+      - run: MEDIA_GUARD_TEST_IMAGE=hh-media-guard:ci bash scripts/unraid-gate.sh

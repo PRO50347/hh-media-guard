@@ -2,7 +2,7 @@
 
 Start with Monitor Only and read-only media mounts. Set a persistent `/config`, a canonical 32-byte base64 `ENCRYPTION_KEY` (`openssl rand -base64 32`), and `APP_URL` to the exact browser origin, including scheme and port. Open that URL, create the local administrator, and complete the setup wizard. Configure integrations and paths in Settings afterward; neither Sonarr nor Radarr is mandatory.
 
-Save each integration's base URL and API key, then Test connection. Empty API-key fields keep the encrypted existing key. Remove clears the integration credentials. Connection tests use saved values, so save changes first.
+Enter each integration's base URL and API key, then Test connection before saving. Tests use the current form values without persisting them. After Save/reload a blank API-key field uses the decrypted existing key. Remove clears the integration credentials. See [Unraid networking and setup](unraid.md) for bridge-mode addresses, URL bases and diagnostic guidance.
 
 `MEDIA_ROOTS` is the comma-separated administrator-approved list of container roots (Compose uses `/movies,/tv`). In Settings → Path mappings, map the Arr-visible directory, such as `/data/tv`, to the existing container directory `/tv`. Select Sonarr, Radarr, or generic, choose a media type, and Test mapping before saving. Editing allows disabling a mapping without deleting it. Removing a mapping does not move files. The longest enabled source prefix wins; paths must stay inside approved roots and cannot contain traversal or symlinks escaping those roots.
 

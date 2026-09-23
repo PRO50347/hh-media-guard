@@ -1,7 +1,9 @@
 import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "tests/e2e",
-  testMatch: "**/*.spec.ts",
+  testMatch: process.env.UNRAID_PHASE
+    ? "**/unraid.spec.ts"
+    : "**/workflows.spec.ts",
   workers: 1,
   timeout: 60000,
   expect: { timeout: 15000 },

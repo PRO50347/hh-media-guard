@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — planned 0.2.2
+
+- Fix fresh Unraid appdata permissions with scoped initialization and a non-root PUID/PGID runtime; preserve existing 100:101 defaults. Never recurse into media.
+- Add distinct, secret-safe startup and Arr connection diagnostics.
+- Fix Sonarr/Radarr unsaved Test Connection, verify the correct service and preserve encrypted saved-key testing across restarts.
+- Complete the beginner-friendly Unraid template, networking/upgrade documentation and CI template contract.
+- Add production fresh-bind-mount, read-only-media, encrypted-credential, restart/recreate and failure-path gates using isolated Sonarr/Radarr mocks.
+
 ## 0.2.1
 
 - Fixed the browser favicon and Docker/Unraid application icon to use the original H&H fox logo.

@@ -6,6 +6,8 @@ services:
     ports:
       - "3938:3938"
     environment:
+      - PUID=${PUID:-100}
+      - PGID=${PGID:-101}
       - TZ=${TZ:-Etc/UTC}
       - APP_NAME=${APP_NAME:-H&H Media Guard}
       - SUITE_NAME=${SUITE_NAME:-H&H Suite}

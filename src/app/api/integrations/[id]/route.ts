@@ -1,3 +1,4 @@
+import { SafeError, safeMessage } from "@/lib/safe-error";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { ArrClient } from "@/lib/clients";
@@ -75,24 +76,57 @@ export async function POST(
   } catch {
     return NextResponse.json({ error: "Request rejected" }, { status: 403 });
   }
-  const name = id((await params).id);
+  let testedSaved: "sonarr" | "radarr" | undefined;
   try {
+    const name = id((await params).id);
+    const data = request.headers
+      .get("content-type")
+      ?.includes("application/json")
+      ? z
+          .object({
+            url: z.string().max(2048).optional(),
+            apiKey: z.string().min(1).max(512).optional(),
+          })
+          .parse(await jsonBody(request))
+      : {};
     const config = integration(name);
-    const key = integrationKey(name);
-    if (!config.url || !key) throw new Error("Missing configuration");
-    const result = await new ArrClient(
-      config.url,
-      decryptSecret(key),
-    ).testConnection();
-    integrationResult(name, result.version);
-    return NextResponse.json({ ok: true, version: result.version });
-  } catch {
-    const error =
-      "Connection failed. Check the saved URL, credentials, network access, and encryption key.";
-    integrationResult(name, undefined, error);
-    return NextResponse.json({ error }, { status: 400 });
+    const stored = integrationKey(name);
+    const url = data.url ?? config.url;
+    if (data.apiKey === undefined && url === config.url) testedSaved = name;
+    if (!url)
+      throw new SafeError("arr.url", "Enter the server URL before testing.");
+    serviceUrl(url);
+    const key = data.apiKey ?? (stored ? decryptSecret(stored) : undefined);
+    if (!key)
+      throw new SafeError("arr.key", "Enter an API key before testing.");
+    const result = await new ArrClient(url, key).testConnection(name);
+    // Testing unsaved input neither saves credentials nor rewrites saved status.
+    if (testedSaved) integrationResult(testedSaved, result.version);
+    return NextResponse.json({
+      ok: true,
+      version: result.version,
+      service: name,
+    });
+  } catch (error) {
+    const message = safeMessage(
+      error,
+      "Connection test rejected; check the URL and API key input.",
+    );
+    try {
+      if (testedSaved) integrationResult(testedSaved, undefined, message);
+    } catch {
+      /* A status-write failure must not expose database exceptions. */
+    }
+    return NextResponse.json(
+      {
+        error: message,
+        code: error instanceof SafeError ? error.code : "arr.input",
+      },
+      { status: 400 },
+    );
   }
 }
+
 export async function DELETE(
   _: Request,
   { params }: { params: Promise<{ id: string }> },

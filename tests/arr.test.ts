@@ -213,3 +213,51 @@ describe("mapping translation", () => {
       ]),
     ).toBeUndefined());
 });
+
+describe("connection service identity", () => {
+  it.each(["sonarr", "radarr"] as const)(
+    "requires genuine %s API v3 identity",
+    async (service) => {
+      const other = service === "sonarr" ? "Radarr" : "Sonarr";
+      for (const response of [
+        { version: "4.0.0" },
+        { version: "4.0.0", appName: other },
+        { version: "4.0.0 secret-value", appName: service },
+      ]) {
+        await expect(
+          new SonarrClient(
+            "http://fixture.test",
+            "secret-value",
+            async () => response,
+          ).testConnection(service),
+        ).rejects.toThrow(/Unexpected|Wrong service/);
+      }
+    },
+  );
+  it.each([
+    "http://fixture.test",
+    "http://fixture.test/",
+    "https://fixture.test/base",
+    "https://fixture.test/base/",
+  ])("joins base path %s without changing the key", async (url) => {
+    const transport: ArrTransport = vi.fn(async () => ({
+      version: "4.0.0.1",
+      appName: "Sonarr",
+    }));
+    await new SonarrClient(
+      url,
+      "exact+plaintext/key",
+      transport,
+    ).testConnection("sonarr");
+    expect(transport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pathname: url.includes("/base")
+          ? "/base/api/v3/system/status"
+          : "/api/v3/system/status",
+      }),
+      "exact+plaintext/key",
+      "GET",
+      undefined,
+    );
+  });
+});

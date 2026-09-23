@@ -1,3 +1,4 @@
+import { SafeError } from "./safe-error";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import http from "node:http";
@@ -40,7 +41,12 @@ export function permittedServiceAddress(address: string) {
 }
 
 export function serviceUrl(input: string) {
-  const url = new URL(input);
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new SafeError("arr.url", "Invalid URL. Enter an HTTP(S) server URL.");
+  }
   if (
     !["http:", "https:"].includes(url.protocol) ||
     url.username ||
@@ -48,7 +54,8 @@ export function serviceUrl(input: string) {
     url.search ||
     url.hash
   )
-    throw new Error(
+    throw new SafeError(
+      "arr.url",
       "Use an HTTP(S) base URL without credentials, query, or fragment",
     );
   const host = url.hostname.replace(/^\[|\]$/g, "");
@@ -57,7 +64,10 @@ export function serviceUrl(input: string) {
     host.endsWith(".localhost") ||
     (isIP(host) && !permittedServiceAddress(host))
   )
-    throw new Error("Service URL points to a prohibited address");
+    throw new SafeError(
+      "arr.address",
+      "Service URL points to a prohibited address. localhost is this container; use the server LAN address or a shared-network container name.",
+    );
   return url;
 }
 
@@ -77,16 +87,29 @@ export const arrTransport: ArrTransport = async (url, key, method, body) => {
     lookup(host, { all: true }),
     new Promise<never>((_, reject) => {
       dnsTimer = setTimeout(
-        () => reject(new Error("Arr DNS lookup timed out")),
+        () =>
+          reject(
+            new SafeError(
+              "arr.timeout",
+              "DNS lookup timed out; check Docker DNS/network access.",
+            ),
+          ),
         8000,
       );
     }),
-  ]).finally(() => clearTimeout(dnsTimer));
+  ])
+    .catch((error) => {
+      throw networkError(error);
+    })
+    .finally(() => clearTimeout(dnsTimer));
   if (
     !addresses.length ||
     addresses.some((a) => !permittedServiceAddress(a.address))
   )
-    throw new Error("Service DNS resolves to a prohibited address");
+    throw new SafeError(
+      "arr.address",
+      "Service DNS resolves to a prohibited address",
+    );
   const address = addresses[0];
   return new Promise((resolve, reject) => {
     const transport = url.protocol === "https:" ? https : http;
@@ -115,32 +138,95 @@ export const arrTransport: ArrTransport = async (url, key, method, body) => {
         let size = 0;
         response.on("data", (chunk: Buffer) => {
           size += chunk.length;
-          if (size > 4_000_000) request.destroy(new Error("limit"));
+          if (size > 4_000_000)
+            request.destroy(
+              new SafeError(
+                "arr.response",
+                "Arr response exceeds the supported size limit",
+              ),
+            );
           else chunks.push(chunk);
         });
         response.on("end", () => {
           const status = response.statusCode || 500;
           if (status < 200 || status >= 300) {
-            reject(new Error(`Arr request failed with HTTP ${status}`));
+            reject(
+              new SafeError(
+                "arr.http",
+                `Arr returned HTTP ${status}. ${status === 401 ? "API key rejected; check the key." : status === 403 ? "Access forbidden; check the API key and proxy permissions." : status === 404 ? "API endpoint not found; check the URL base/path and API v3 support." : status >= 300 && status < 400 ? "Redirect rejected; enter the final server URL including its URL base." : "Check service/proxy availability."}`,
+              ),
+            );
             return;
           }
           const text = Buffer.concat(chunks).toString("utf8");
           try {
             resolve(text ? JSON.parse(text) : undefined);
           } catch {
-            reject(new Error("Arr returned malformed JSON"));
+            reject(
+              new SafeError(
+                "arr.response",
+                "Unexpected Arr response (not JSON); check the URL base/path and proxy.",
+              ),
+            );
           }
         });
         response.on("error", () =>
-          reject(new Error("Arr response interrupted")),
+          reject(
+            new SafeError(
+              "arr.response",
+              "Arr response interrupted; check connectivity",
+            ),
+          ),
         );
       },
     );
-    const timer = setTimeout(() => request.destroy(new Error("timeout")), 8000);
-    request.on("close", () => clearTimeout(timer));
-    request.on("error", () =>
-      reject(new Error("Arr request failed or timed out; check connectivity")),
+    const timer = setTimeout(
+      () =>
+        request.destroy(
+          new SafeError(
+            "arr.timeout",
+            "Arr request timed out; check connectivity and service availability.",
+          ),
+        ),
+      8000,
     );
+    request.on("close", () => clearTimeout(timer));
+    request.on("error", (error) => reject(networkError(error)));
     request.end(payload);
   });
 };
+
+/** Do not serialize upstream messages: they can contain URLs, headers or keys. */
+export function networkError(error: unknown): SafeError {
+  if (error instanceof SafeError) return error;
+  const code = (error as NodeJS.ErrnoException)?.code || "";
+  if (["ENOTFOUND", "EAI_AGAIN"].includes(code))
+    return new SafeError(
+      "arr.dns",
+      "DNS lookup failed; check the hostname and shared Docker network.",
+    );
+  if (code === "ECONNREFUSED")
+    return new SafeError(
+      "arr.refused",
+      "Connection refused; check the host port and whether the service is running.",
+    );
+  if (["ENETUNREACH", "EHOSTUNREACH"].includes(code))
+    return new SafeError(
+      "arr.unreachable",
+      "Host unreachable; check routing, firewall and Docker network.",
+    );
+  if (["ETIMEDOUT", "ESOCKETTIMEDOUT"].includes(code))
+    return new SafeError(
+      "arr.timeout",
+      "Arr request timed out; check connectivity.",
+    );
+  if (/CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY/.test(code))
+    return new SafeError(
+      "arr.tls",
+      "TLS certificate validation failed; use a valid trusted certificate and matching hostname.",
+    );
+  return new SafeError(
+    "arr.network",
+    "Arr connection failed; check connectivity and server availability.",
+  );
+}

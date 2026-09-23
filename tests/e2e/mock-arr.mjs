@@ -14,10 +14,12 @@ http
       res.end("{}");
       return;
     }
+    const service = url.pathname.startsWith("/sonarr/") ? "Sonarr" : "Radarr";
+    url.pathname = url.pathname.replace(/^\/(sonarr|radarr)/, "");
     const routes = {
       "/api/v3/system/status": {
-        version: "fixture-1.0",
-        appName: "Fixture Arr",
+        version: "4.0.0",
+        appName: service,
       },
       "/api/v3/movie": [
         { id: 1, title: "Generated English Movie", year: 2026, hasFile: true },

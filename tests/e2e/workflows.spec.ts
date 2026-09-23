@@ -25,14 +25,20 @@ test("production administration, mapped audits, branding and safe restore", asyn
       has: page.getByRole("heading", { name: source, exact: true }),
     });
     await card.getByLabel("Enabled", { exact: true }).check();
-    await card.getByLabel("Server URL").fill("http://arr-fixture:8989");
+    await card
+      .getByLabel("Server URL")
+      .fill(`http://arr-fixture:8989/${source.toLowerCase()}`);
     await card.getByLabel("API key").fill("fixture-api-key");
+    await card.getByRole("button", { name: "Test connection" }).click();
+    await expect(card.getByRole("status").first()).toHaveText(
+      "Connected: 4.0.0",
+    );
     await card
       .getByRole("button", { name: `Save ${source.toLowerCase()}` })
       .click();
     await expect(card.getByLabel("API key")).toHaveValue("");
     await card.getByRole("button", { name: "Test connection" }).click();
-    await expect(card.getByText("Detected version: fixture-1.0")).toBeVisible();
+    await expect(card.getByText("Detected version: 4.0.0")).toBeVisible();
   }
   const mappings = page.locator("section").filter({
     has: page.getByRole("heading", { name: "Path mappings", exact: true }),

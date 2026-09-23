@@ -12,3 +12,7 @@ docs
 *.tsbuildinfo
 test-results
 playwright-report
+
+.unraid-fixture.*
+
+.stabilization-validation.log

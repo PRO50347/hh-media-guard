@@ -1,14 +1,25 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
+import { SafeError } from "./safe-error";
+
 function key(): Buffer {
   const encoded = process.env.ENCRYPTION_KEY;
   if (!encoded)
-    throw new Error(
+    throw new SafeError(
+      "encryption.missing",
       "ENCRYPTION_KEY is required. Configure a stable 32-byte base64 value before starting Media Guard.",
     );
   const value = Buffer.from(encoded, "base64");
-  if (value.length !== 32 || value.toString("base64") !== encoded)
-    throw new Error("ENCRYPTION_KEY must be a 32-byte base64 value.");
+  if (value.toString("base64") !== encoded)
+    throw new SafeError(
+      "encryption.malformed",
+      "ENCRYPTION_KEY is malformed; use canonical base64 for a 32-byte key.",
+    );
+  if (value.length !== 32)
+    throw new SafeError(
+      "encryption.length",
+      "ENCRYPTION_KEY has incorrect decoded length; a 32-byte key is required.",
+    );
   return value;
 }
 export function validateEncryptionKey() {
@@ -27,17 +38,24 @@ export function encryptSecret(value: string): string {
 }
 
 export function decryptSecret(payload: string): string {
-  const [ivText, tagText, valueText] = payload.split(".");
-  if (!ivText || !tagText || !valueText)
-    throw new Error("Stored credential is invalid.");
-  const decipher = createDecipheriv(
-    "aes-256-gcm",
-    key(),
-    Buffer.from(ivText, "base64"),
-  );
-  decipher.setAuthTag(Buffer.from(tagText, "base64"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(valueText, "base64")),
-    decipher.final(),
-  ]).toString("utf8");
+  try {
+    const [ivText, tagText, valueText] = payload.split(".");
+    if (!ivText || !tagText || !valueText)
+      throw new Error("Stored credential is invalid.");
+    const decipher = createDecipheriv(
+      "aes-256-gcm",
+      key(),
+      Buffer.from(ivText, "base64"),
+    );
+    decipher.setAuthTag(Buffer.from(tagText, "base64"));
+    return Buffer.concat([
+      decipher.update(Buffer.from(valueText, "base64")),
+      decipher.final(),
+    ]).toString("utf8");
+  } catch {
+    throw new SafeError(
+      "credential.decrypt",
+      "Stored credential cannot be decrypted. Restore the original ENCRYPTION_KEY or re-enter the API key.",
+    );
+  }
 }
