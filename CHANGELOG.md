@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- Fixed the browser favicon and Docker/Unraid application icon to use the original H&H fox logo.
+- Made these two icons builder-managed repository assets, with no user-facing settings or API overrides.
+- Preserved all other user-customizable branding, including names, theme/accent, main and compact logos, login artwork, suite visibility and Suite links.
+
 ## 0.2.0
 
 - Added local administrator authentication, hashed sessions, CSRF/exact-origin enforcement, encrypted write-only Arr keys and additive v0.1-preserving migrations.
