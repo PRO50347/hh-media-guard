@@ -8,11 +8,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: npm }
       - run: npm ci
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: test "$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME#v}"
+      - run: node scripts/release-check.mjs
+      - run: test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
+      - run: git diff --check
       - run: npm run audit && npm run secrets && npm run typecheck && npm run lint -- --max-warnings=0 && npm test && MG_BUILD=1 npm run build
       - run: docker build -t hh-media-guard:release .
       - run: MEDIA_GUARD_TEST_IMAGE=hh-media-guard:release bash scripts/browser-gate.sh
@@ -38,4 +41,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
+            VCS_REF=${{ github.sha }}
       - uses: softprops/action-gh-release@v2
+        with:
+          body_path: CHANGELOG.md
