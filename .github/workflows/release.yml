@@ -50,6 +50,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/pro50347/hh-media-guard
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
           tags: |
             type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
             type=semver,pattern={{major}}.{{minor}},value=${{ env.RELEASE_TAG }}
