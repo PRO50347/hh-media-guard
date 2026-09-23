@@ -2,19 +2,40 @@ name: Release
 on:
   push:
     tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated release tag to validate and publish
+        required: true
+        type: string
 permissions: {contents: write, packages: write}
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+      # Checkout can materialize the triggering tag as a peeled commit ref.
+      # Fetch the exact remote tag object before checking annotation/identity.
+      - id: source
+        shell: bash
+        run: |
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{}")"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: npm }
       - run: npm ci
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: node scripts/release-check.mjs
-      - run: test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
+      - run: GITHUB_REF_TYPE=tag GITHUB_REF_NAME="$RELEASE_TAG" node scripts/release-check.mjs
       - run: git diff --check
       - run: npm run audit && npm run secrets && npm run typecheck && npm run lint -- --max-warnings=0 && npm test && MG_BUILD=1 npm run build
       - run: docker build -t hh-media-guard:release .
@@ -30,9 +51,9 @@ jobs:
         with:
           images: ghcr.io/pro50347/hh-media-guard
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=semver,pattern={{version}},value=${{ env.RELEASE_TAG }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.RELEASE_TAG }}
+            type=semver,pattern={{major}},value=${{ env.RELEASE_TAG }}
             type=raw,value=latest
       - uses: docker/build-push-action@v6
         with:
@@ -43,7 +64,8 @@ jobs:
           platforms: linux/amd64
           build-args: |
             APP_VERSION=${{ steps.meta.outputs.version }}
-            VCS_REF=${{ github.sha }}
+            VCS_REF=${{ steps.source.outputs.sha }}
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           body_path: CHANGELOG.md
