@@ -6,7 +6,7 @@ import path from "node:path";
 import { z } from "zod";
 import { audit, getConfigDir, raw } from "./store";
 
-export const assetKind = z.enum(["logo", "compact", "favicon", "background"]);
+export const assetKind = z.enum(["logo", "compact", "background"]);
 export type AssetKind = z.infer<typeof assetKind>;
 export const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 
@@ -114,9 +114,8 @@ export function brandingAssets() {
     .prepare("SELECT kind,filename FROM branding_assets")
     .all() as { kind: AssetKind; filename: string }[];
   return Object.fromEntries(
-    rows.map((row) => [
-      row.kind,
-      `/api/branding/${row.kind}?v=${row.filename}`,
-    ]),
+    rows
+      .filter((row) => assetKind.safeParse(row.kind).success)
+      .map((row) => [row.kind, `/api/branding/${row.kind}?v=${row.filename}`]),
   );
 }

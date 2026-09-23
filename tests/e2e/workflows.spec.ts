@@ -95,7 +95,7 @@ test("production administration, mapped audits, branding and safe restore", asyn
     .getByLabel("Compact / header logo")
     .setInputFiles({ name: "fixture.png", mimeType: "image/png", buffer: png });
   await expect(page.locator(".logo img")).toBeVisible();
-  for (const label of ["Main logo", "Favicon", "Login artwork"]) {
+  for (const label of ["Main logo", "Login artwork"]) {
     await page.getByLabel(label, { exact: true }).setInputFiles({
       name: "fixture.png",
       mimeType: "image/png",
@@ -103,6 +103,50 @@ test("production administration, mapped audits, branding and safe restore", asyn
     });
     await expect(page.getByLabel(label, { exact: true })).toBeEnabled();
   }
+  await expect(page.getByLabel("Favicon", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Docker / Unraid icon URL")).toHaveCount(0);
+  await expect(page.locator('link[rel="icon"]')).toHaveAttribute(
+    "href",
+    "/branding/fox-logo.png",
+  );
+  const fixedIcon = await request.get("/branding/fox-logo.png");
+  expect(fixedIcon.ok()).toBe(true);
+  expect(fixedIcon.headers()["content-type"]).toContain("image/png");
+  const locked = await page.evaluate(async () => {
+    const { csrfToken } = await (await fetch("/api/auth")).json();
+    const headers = {
+      "x-csrf-token": csrfToken,
+      "content-type": "application/json",
+    };
+    return {
+      upload: (
+        await fetch("/api/branding/favicon", {
+          method: "PUT",
+          headers,
+          body: "blocked",
+        })
+      ).status,
+      remove: (
+        await fetch("/api/branding/favicon", { method: "DELETE", headers })
+      ).status,
+      read: (await fetch("/api/branding/favicon")).status,
+      iconSetting: (
+        await fetch("/api/settings", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            iconUrl: "https://example.test/override.png",
+          }),
+        })
+      ).status,
+    };
+  });
+  expect(locked).toEqual({
+    upload: 400,
+    remove: 403,
+    read: 404,
+    iconSetting: 400,
+  });
   await page.goto("/library");
   await page.getByRole("button", { name: "Start library audit" }).click();
   await expect(page.getByRole("status")).toContainText("Queued job");

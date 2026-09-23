@@ -7,11 +7,10 @@ import { Navigation } from "@/components/Navigation";
 export const dynamic = "force-dynamic";
 export async function generateMetadata() {
   const s = getSettings();
-  const a = brandingAssets();
   return {
     title: s.appName,
     description: "Audio-language policy and media inspection",
-    icons: a.favicon ? { icon: a.favicon } : undefined,
+    icons: { icon: { url: "/branding/fox-logo.png", type: "image/png" } },
   };
 }
 export default async function RootLayout({

@@ -37,7 +37,6 @@ export function AppearanceSettings({ initial }: { initial: Settings }) {
                 accent: value.accent,
                 theme: value.theme,
                 showSuite: value.showSuite,
-                iconUrl: value.iconUrl,
                 suiteLinks: links,
               }),
             ),
@@ -79,14 +78,6 @@ export function AppearanceSettings({ initial }: { initial: Settings }) {
                 <option key={v}>{v}</option>
               ))}
             </select>
-          </label>
-          <label>
-            Docker / Unraid icon URL
-            <input
-              type="url"
-              value={value.iconUrl || ""}
-              onChange={(e) => setValue({ ...value, iconUrl: e.target.value })}
-            />
           </label>
         </div>
         <label className="checkbox">
@@ -176,55 +167,50 @@ export function AppearanceSettings({ initial }: { initial: Settings }) {
           </button>
         </div>
       </form>
+      <p className="muted">
+        The browser favicon and Docker/Unraid app icon use the builder-managed
+        H&H fox logo. All other branding below remains customizable.
+      </p>
       <h3>Persistent images</h3>
       <p className="muted">
         PNG, JPEG or WebP; maximum 2 MiB and 4096 × 4096 pixels. SVG and
         animated files are not accepted. Images persist under /config/branding.
       </p>
       <div className="form-grid">
-        {(["logo", "compact", "favicon", "background"] as const).map(
-          (kind, index) => (
-            <div key={kind}>
-              <label>
-                {
-                  [
-                    "Main logo",
-                    "Compact / header logo",
-                    "Favicon",
-                    "Login artwork",
-                  ][index]
-                }
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  disabled={busy}
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file)
-                      void run(() =>
-                        api(`/api/branding/${kind}`, {
-                          method: "PUT",
-                          headers: { "content-type": file.type },
-                          body: file,
-                        }),
-                      );
-                    e.target.value = "";
-                  }}
-                />
-              </label>
-              <button
+        {(["logo", "compact", "background"] as const).map((kind, index) => (
+          <div key={kind}>
+            <label>
+              {["Main logo", "Compact / header logo", "Login artwork"][index]}
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
                 disabled={busy}
-                onClick={() =>
-                  void run(() =>
-                    api(`/api/branding/${kind}`, { method: "DELETE" }),
-                  )
-                }
-              >
-                Reset {kind}
-              </button>
-            </div>
-          ),
-        )}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file)
+                    void run(() =>
+                      api(`/api/branding/${kind}`, {
+                        method: "PUT",
+                        headers: { "content-type": file.type },
+                        body: file,
+                      }),
+                    );
+                  e.target.value = "";
+                }}
+              />
+            </label>
+            <button
+              disabled={busy}
+              onClick={() =>
+                void run(() =>
+                  api(`/api/branding/${kind}`, { method: "DELETE" }),
+                )
+              }
+            >
+              Reset {kind}
+            </button>
+          </div>
+        ))}
       </div>
       <p role="status">{message}</p>
     </section>

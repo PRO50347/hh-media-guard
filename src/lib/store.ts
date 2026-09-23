@@ -53,7 +53,10 @@ export function getSettings(): Settings {
   const row = db.prepare("SELECT data FROM settings WHERE id=1").get() as
     | { data: string }
     | undefined;
-  return row ? { ...defaults(), ...JSON.parse(row.data) } : defaults();
+  const saved = row ? JSON.parse(row.data) : {};
+  // Legacy Docker icon preferences cannot override the packaged builder asset.
+  delete saved.iconUrl;
+  return { ...defaults(), ...saved };
 }
 export function audit(type: string, detail: string, actor = "system") {
   db.prepare(

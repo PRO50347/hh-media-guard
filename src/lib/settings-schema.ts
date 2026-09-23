@@ -28,15 +28,8 @@ export const settingsSchema = z.object({
   retryCooldownMinutes: z.number().int().min(1).max(10080),
   quarantinePath: z.string().max(1024).optional(),
   setupComplete: z.boolean(),
-  iconUrl: z
-    .union([
-      z.literal(""),
-      z
-        .string()
-        .url()
-        .refine((v) => /^https?:\/\//.test(v)),
-    ])
-    .optional(),
+  // Retired setting: reject writes rather than silently accepting an override.
+  iconUrl: z.never().optional(),
   suiteLinks: z.array(link).max(20).optional(),
   scanIntervalHours: z.number().int().min(0).max(720).optional(),
 });

@@ -50,7 +50,6 @@ export interface Settings {
   retryCooldownMinutes: number;
   setupComplete: boolean;
   quarantinePath?: string;
-  iconUrl?: string;
   suiteLinks?: { name: string; url: string; icon: string; enabled: boolean }[];
   scanIntervalHours?: number;
 }
