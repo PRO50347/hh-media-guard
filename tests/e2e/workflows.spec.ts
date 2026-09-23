@@ -169,6 +169,9 @@ test("production administration, mapped audits, branding and safe restore", asyn
     })
     .toBe(1);
   page.once("dialog", (dialog) => dialog.accept());
+  await expect(
+    page.getByRole("button", { name: "Restore file" }),
+  ).toBeEnabled();
   await page.getByRole("button", { name: "Restore file" }).click();
   await expect(page.getByText("File restored", { exact: true })).toBeVisible();
   await page.goto("/attention");

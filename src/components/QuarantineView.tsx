@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, json } from "./api";
 export function QuarantineView({
@@ -16,6 +16,10 @@ export function QuarantineView({
 }) {
   const [message, setMessage] = useState("");
   const router = useRouter();
+  useEffect(() => {
+    const timer = setInterval(() => router.refresh(), 3000);
+    return () => clearInterval(timer);
+  }, [router]);
   return (
     <>
       <p>
