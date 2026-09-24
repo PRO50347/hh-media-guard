@@ -60,3 +60,19 @@ it("does not expose untrusted response bodies in errors", async () => {
     /^Arr returned HTTP 401\. API key rejected; check the key\.$/,
   );
 });
+it("applies the same mixed-DNS SSRF protection to streamed library responses", async () => {
+  mocks.lookup.mockResolvedValue([
+    { address: "192.168.1.20", family: 4 },
+    { address: "169.254.169.254", family: 4 },
+  ]);
+  await expect(
+    arrTransport(
+      new URL("http://fixture.test"),
+      "fixture-secret",
+      "GET",
+      undefined,
+      { project: (v) => v },
+    ),
+  ).rejects.toThrow("prohibited");
+  expect(mocks.request).not.toHaveBeenCalled();
+});

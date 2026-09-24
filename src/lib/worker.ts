@@ -14,6 +14,7 @@ import { fingerprint, scanFile } from "./scanner";
 import { decryptSecret } from "./crypto";
 import { RadarrClient, SonarrClient } from "./clients";
 import {
+  matchingFileEvidence,
   enumerateRadarr,
   enumerateSonarr,
   translateArrPath,
@@ -73,14 +74,26 @@ async function inspect(
   input: string,
   signal: AbortSignal,
   force = false,
+  item?: LibraryFile,
 ): Promise<ScanResult> {
   const file = await safeMediaPath(input, roots());
+  const evidence =
+    item && translateArrPath(item.source, item.arrPath) === input
+      ? matchingFileEvidence(item)
+      : undefined;
   const stamp = await fingerprint(file, getSettings());
   const prior = raw()
     .prepare("SELECT data FROM scans WHERE fingerprint=?")
     .get(stamp) as { data: string } | undefined;
-  if (prior && !force) return JSON.parse(prior.data) as ScanResult;
-  return scanFile(file, signal);
+  if (prior && !force) {
+    const cached = JSON.parse(prior.data) as ScanResult;
+    if (
+      JSON.stringify(cached.arrFileEvidence || null) ===
+      JSON.stringify(evidence || null)
+    )
+      return cached;
+  }
+  return scanFile(file, signal, evidence);
 }
 function owns(job: LeasedJob, signal: AbortSignal) {
   signal.throwIfAborted();
@@ -180,19 +193,44 @@ async function auditLibrary(
     if (!config.url || !encrypted)
       throw new Error(`${source} is missing its URL or API key`);
     const key = decryptSecret(encrypted);
-    items.push(
-      ...(source === "sonarr"
+    const client =
+      source === "sonarr"
+        ? new SonarrClient(config.url, key)
+        : new RadarrClient(config.url, key);
+    await client.testConnection(source);
+    const enumerated =
+      source === "sonarr"
         ? await enumerateSonarr(
-            new SonarrClient(config.url, key),
+            client as SonarrClient,
             scope,
             signal,
+            (count) => {
+              owns(job, signal);
+              jobQueue.progress(
+                job,
+                0,
+                `Enumerating ${source}: ${count} files discovered`,
+              );
+            },
           )
         : await enumerateRadarr(
-            new RadarrClient(config.url, key),
+            client as RadarrClient,
             scope,
             signal,
-          )),
-    );
+            (count) => {
+              owns(job, signal);
+              jobQueue.progress(
+                job,
+                0,
+                `Enumerating ${source}: ${count} files discovered`,
+              );
+            },
+          );
+    for (const item of enumerated) items.push(item);
+    if (items.length > 100_000)
+      throw new Error(
+        "Combined library exceeds 100,000 files; audit one source or title at a time",
+      );
   }
   jobQueue.counts(job, items.length, 0);
   let completed = 0;
@@ -220,9 +258,15 @@ async function auditLibrary(
           .prepare("SELECT decision FROM media_items WHERE id=?")
           .get(mediaId) as { decision: string } | undefined;
         if (!scope.filter || prior?.decision === scope.filter) {
-          const scan = await inspect(file, signal, scope.force);
+          const scan = await inspect(file, signal, scope.force, item);
           owns(job, signal);
           saveScan(scan);
+          if (scan.decision === "pass")
+            raw()
+              .prepare(
+                "UPDATE attention SET state='resolved' WHERE subject IN (?,?) AND reason='unknown language' AND state='open'",
+              )
+              .run(mediaId, scan.path);
           raw()
             .prepare(
               "UPDATE media_items SET fingerprint=?,decision=?,last_scanned_at=? WHERE id=?",

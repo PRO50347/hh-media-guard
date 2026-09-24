@@ -37,7 +37,12 @@ const handler = (service) => (req, res) => {
             },
           ],
           "/api/v3/episodefile": [
-            { id: 111, seriesId: 10, path: "/arr/tv/sonarr.mka" },
+            {
+              id: 111,
+              seriesId: 10,
+              path: "/arr/tv/sonarr.mka",
+              languages: [{ id: 1, name: "English" }],
+            },
           ],
         }
       : {
@@ -45,9 +50,21 @@ const handler = (service) => (req, res) => {
             { id: 1, title: "Wizard Movie", hasFile: true, year: 2026 },
           ],
           "/api/v3/moviefile": [
-            { id: 101, movieId: 1, path: "/arr/movies/radarr.mka" },
+            {
+              id: 101,
+              movieId: 1,
+              path: "/arr/movies/radarr.mka",
+              languages: [{ id: 1, name: "English" }],
+            },
           ],
         };
+  const single = pathname.match(/^\/api\/v3\/(movie|series)\/(\d+)$/);
+  if (single) {
+    const record = library[`/api/v3/${single[1]}`]?.find(
+      (item) => item.id === Number(single[2]),
+    );
+    return reply(record ? 200 : 404, record || {});
+  }
   if (library[pathname]) return reply(200, library[pathname]);
   if (pathname !== "/api/v3/system/status") return reply(404, {});
   reply(200, {

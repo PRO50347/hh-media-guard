@@ -40,7 +40,7 @@ describe("worker ownership and recovery", () => {
     });
     await runner.stop();
   });
-  it("moves only the claimed job to Needs Attention on its final attempt", async () => {
+  it("marks only the claimed job as failed on its final attempt", async () => {
     const first = queue.enqueue("scan-file", { path: "/first" });
     now++;
     const second = queue.enqueue("scan-file", { path: "/second" });
@@ -49,7 +49,7 @@ describe("worker ownership and recovery", () => {
       throw new Error("third failure");
     });
     await runner.tick();
-    expect(queue.get(first.id)?.state).toBe("needs-attention");
+    expect(queue.get(first.id)?.state).toBe("failed");
     expect(queue.get(second.id)?.state).toBe("queued");
     await runner.stop();
   });
@@ -102,7 +102,7 @@ describe("worker ownership and recovery", () => {
       job.id,
     );
     queue.recover();
-    expect(queue.get(job.id)?.state).toBe("needs-attention");
+    expect(queue.get(job.id)?.state).toBe("failed");
   });
   it("revokes the lease when cancelled", () => {
     queue.enqueue("scan-file", { path: "/a" });

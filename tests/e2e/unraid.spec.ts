@@ -206,6 +206,21 @@ test(`Unraid production connections and persistence: ${phase}`, async ({
         ),
       ).toBeVisible();
       await expect(page.getByText("pass", { exact: true })).toBeVisible();
+      await page.goto("/history");
+      const evidence = page
+        .locator("details")
+        .filter({
+          has: page.locator("summary").filter({ hasText: `${source}.mka` }),
+        })
+        .first();
+      await evidence.locator("summary").first().click();
+      await expect(
+        evidence.getByText(`${source}-fallback`, { exact: true }),
+      ).toBeVisible();
+      await expect(
+        evidence.getByText("English", { exact: true }),
+      ).toBeVisible();
+      await expect(evidence.getByText("und", { exact: true })).toBeVisible();
     }
   }
   const logo = await request.get("/api/branding/logo");

@@ -52,6 +52,7 @@ describe("Arr API contracts", () => {
       "mock-key",
       "GET",
       undefined,
+      expect.objectContaining({ project: expect.any(Function) }),
     );
   });
   it("enumerates Radarr moviefile resources", async () => {
@@ -260,4 +261,95 @@ describe("connection service identity", () => {
       undefined,
     );
   });
+});
+
+it("rejects wrong series/movie associations and conflicting duplicate file records", async () => {
+  const base = {
+    series: async () => [{ id: 1, title: "Show" }],
+    episodes: async () => [
+      {
+        id: 2,
+        seriesId: 1,
+        episodeFileId: 3,
+        seasonNumber: 1,
+        episodeNumber: 1,
+        title: "Episode",
+      },
+    ],
+    episodeFiles: async () => [
+      {
+        id: 3,
+        seriesId: 9,
+        path: "/tv/a",
+        languages: [{ id: 1, name: "English" }],
+      },
+    ],
+  };
+  await expect(enumerateSonarr(base)).rejects.toThrow("another series");
+  await expect(
+    enumerateSonarr({
+      ...base,
+      episodeFiles: async () => [
+        { id: 3, seriesId: 1, path: "/tv/a" },
+        { id: 3, seriesId: 1, path: "/tv/b" },
+      ],
+    }),
+  ).rejects.toThrow("conflicting");
+  await expect(
+    enumerateRadarr({
+      movies: async () => [{ id: 1, title: "Movie", hasFile: true }],
+      movieFiles: async () => [
+        {
+          id: 3,
+          movieId: 9,
+          path: "/movies/a",
+          languages: [{ id: 1, name: "English" }],
+        },
+      ],
+    }),
+  ).rejects.toThrow("another movie");
+});
+it("deduplicates repeated identical titles and files without duplicate requests/results", async () => {
+  const movie = { id: 1, title: "Movie", hasFile: true };
+  const file = { id: 3, movieId: 1, path: "/movies/a" };
+  const movieFiles = vi.fn(async () => [file, file]);
+  expect(
+    await enumerateRadarr({ movies: async () => [movie, movie], movieFiles }),
+  ).toHaveLength(1);
+  expect(movieFiles).toHaveBeenCalledTimes(1);
+});
+it("does not attach file-language fallback without a matching parent identity", async () => {
+  const files = await enumerateRadarr({
+    movies: async () => [{ id: 1, title: "Movie", hasFile: true }],
+    movieFiles: async () => [
+      { id: 3, path: "/movies/a", languages: [{ id: 1, name: "English" }] },
+    ],
+  });
+  expect(files[0].languageEvidence).toBeUndefined();
+});
+it("uses bounded single-title routes when a scope supplies its identity", async () => {
+  const sonarr: ArrTransport = vi.fn(async () => ({ id: 3, title: "Show" }));
+  const radarr: ArrTransport = vi.fn(async () => ({ id: 5, title: "Movie" }));
+  await new SonarrClient("http://fixture.test/base", "key", sonarr).series(
+    undefined,
+    3,
+  );
+  await new RadarrClient("http://fixture.test/base", "key", radarr).movies(
+    undefined,
+    5,
+  );
+  expect(sonarr).toHaveBeenCalledWith(
+    expect.objectContaining({ pathname: "/base/api/v3/series/3" }),
+    "key",
+    "GET",
+    undefined,
+    { signal: undefined },
+  );
+  expect(radarr).toHaveBeenCalledWith(
+    expect.objectContaining({ pathname: "/base/api/v3/movie/5" }),
+    "key",
+    "GET",
+    undefined,
+    { signal: undefined },
+  );
 });

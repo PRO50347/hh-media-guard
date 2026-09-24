@@ -5,7 +5,12 @@ import { isCommentary, isDescriptive, normalizeLanguage } from "./language";
 import { decideAudio } from "./rules";
 import { getSettings } from "./store";
 import { runProcess } from "./process";
-import type { ScanResult, AudioTrack, Settings } from "./types";
+import type {
+  ScanResult,
+  AudioTrack,
+  Settings,
+  ArrLanguageEvidence,
+} from "./types";
 
 const streamSchema = z.object({
   index: z.number().int(),
@@ -72,13 +77,14 @@ export async function fingerprint(
   ];
   return createHash("sha256")
     .update(
-      JSON.stringify([file, info.size, info.mtimeMs, identity, policy, 2]),
+      JSON.stringify([file, info.size, info.mtimeMs, identity, policy, 3]),
     )
     .digest("hex");
 }
 export async function scanFile(
   file: string,
   signal?: AbortSignal,
+  arr?: ArrLanguageEvidence,
 ): Promise<ScanResult> {
   const settings = getSettings();
   const before = await fingerprint(file, settings);
@@ -90,6 +96,7 @@ export async function scanFile(
       index: s.index,
       codec: s.codec_name || "unknown",
       language: normalizeLanguage(s.tags?.language),
+      rawLanguage: s.tags?.language,
       title: s.tags?.title,
       duration: seconds(s.duration || s.tags?.DURATION || s.tags?.duration),
       bitrate: Number(s.bit_rate) || undefined,
@@ -108,7 +115,8 @@ export async function scanFile(
     path: file,
     duration,
     tracks,
-    ...decideAudio(duration, tracks, settings),
+    ...(arr ? { arrFileEvidence: arr } : {}),
+    ...decideAudio(duration, tracks, settings, arr),
     scannedAt: new Date().toISOString(),
     fingerprint: before,
   };

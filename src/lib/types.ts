@@ -14,6 +14,7 @@ export interface AudioTrack {
   index: number;
   codec: string;
   language: string;
+  rawLanguage?: string;
   title?: string;
   duration?: number;
   channels?: number;
@@ -24,12 +25,30 @@ export interface AudioTrack {
   isCommentary: boolean;
   isDescriptive: boolean;
 }
+export interface ArrLanguageEvidence {
+  source: "sonarr" | "radarr";
+  entityId: number;
+  fileId: number;
+  arrPath: string;
+  languages: string[];
+}
+export interface LanguageEvidence {
+  source: "ffprobe" | "sonarr-fallback" | "radarr-fallback";
+  trackIndex?: number;
+  ffprobeLanguage?: string;
+  arr?: ArrLanguageEvidence;
+  isDefault?: boolean;
+  isCommentary?: boolean;
+  isDescriptive?: boolean;
+}
 export interface ScanResult {
   path: string;
   duration?: number;
   tracks: AudioTrack[];
   decision: Decision;
   reason: string;
+  languageEvidence?: LanguageEvidence;
+  arrFileEvidence?: ArrLanguageEvidence;
   scannedAt: string;
   fingerprint?: string;
 }

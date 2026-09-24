@@ -171,15 +171,16 @@ export class JobQueue {
 
   finish(
     job: LeasedJob,
-    state: "completed" | "needs-attention",
+    state: "completed" | "needs-attention" | "failed",
     error?: string,
   ) {
     return (
       this.db
         .prepare(
-          "UPDATE jobs SET state=?,progress=100,error=?,lease_token=NULL,lease_until=NULL,updated_at=? WHERE id=? AND state='running' AND lease_token=? AND lease_until>?",
+          "UPDATE jobs SET state=?,progress=CASE WHEN ?='failed' THEN progress ELSE 100 END,error=?,lease_token=NULL,lease_until=NULL,updated_at=? WHERE id=? AND state='running' AND lease_token=? AND lease_until>?",
         )
         .run(
+          state,
           state,
           error || null,
           this.now(),
@@ -192,7 +193,7 @@ export class JobQueue {
 
   fail(job: LeasedJob, error: string, permanent = false) {
     if (permanent || job.attempts >= 3)
-      return this.finish(job, "needs-attention", error);
+      return this.finish(job, "failed", error);
     const after = new Date(
       this.clock() + Math.min(3_600_000, 1000 * 2 ** job.attempts),
     ).toISOString();
@@ -209,7 +210,7 @@ export class JobQueue {
   recover() {
     return this.db
       .prepare(
-        "UPDATE jobs SET state=CASE WHEN attempts>=3 THEN 'needs-attention' ELSE 'retrying' END,run_after=?,lease_token=NULL,lease_until=NULL,updated_at=?,error='Worker lease expired; previous result is not trusted.' WHERE state='running' AND (lease_until IS NULL OR lease_until<=?)",
+        "UPDATE jobs SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'retrying' END,run_after=?,lease_token=NULL,lease_until=NULL,updated_at=?,error='Worker lease expired; previous result is not trusted.' WHERE state='running' AND (lease_until IS NULL OR lease_until<=?)",
       )
       .run(this.now(), this.now(), this.now()).changes;
   }

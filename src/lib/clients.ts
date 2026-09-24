@@ -6,7 +6,11 @@ import { getSettings } from "./store";
 const id = z.number().int().positive();
 const fileSchema = z.object({
   id,
-  path: z.string().min(1),
+  path: z.string().min(1).max(4096),
+  languages: z
+    .array(z.object({ id: z.number().int(), name: z.string().max(80) }))
+    .max(32)
+    .optional(),
   size: z.number().optional(),
   seriesId: id.optional(),
   movieId: id.optional(),
@@ -14,7 +18,7 @@ const fileSchema = z.object({
 });
 const seriesSchema = z.object({
   id,
-  title: z.string(),
+  title: z.string().max(1024),
   path: z.string().optional(),
 });
 const episodeSchema = z.object({
@@ -23,11 +27,11 @@ const episodeSchema = z.object({
   episodeFileId: z.number().int(),
   seasonNumber: z.number().int(),
   episodeNumber: z.number().int(),
-  title: z.string(),
+  title: z.string().max(1024),
 });
 const movieSchema = z.object({
   id,
-  title: z.string(),
+  title: z.string().max(1024),
   year: z.number().optional(),
   hasFile: z.boolean().optional(),
   movieFile: fileSchema.optional(),
@@ -61,6 +65,7 @@ export class ArrClient {
     endpoint: string,
     method = "GET",
     body?: unknown,
+    options?: Parameters<ArrTransport>[4],
   ): Promise<unknown> {
     if (
       method !== "GET" &&
@@ -71,7 +76,24 @@ export class ArrClient {
     const base = serviceUrl(this.baseUrl);
     base.pathname = `${base.pathname.replace(/\/+$/, "")}/api/v3${endpoint.split("?")[0]}`;
     base.search = endpoint.split("?")[1] || "";
-    return this.transport(base, this.apiKey, method, body);
+    return options
+      ? this.transport(base, this.apiKey, method, body, options)
+      : this.transport(base, this.apiKey, method, body);
+  }
+  protected async list<T>(
+    endpoint: string,
+    schema: z.ZodType<T>,
+    signal?: AbortSignal,
+  ): Promise<T[]> {
+    return z
+      .array(schema)
+      .max(100_000)
+      .parse(
+        await this.request(endpoint, "GET", undefined, {
+          signal,
+          project: (value) => schema.parse(value),
+        }),
+      );
   }
   async testConnection(expected?: "sonarr" | "radarr"): Promise<ArrStatus> {
     const response = await this.request("/system/status");
@@ -133,18 +155,33 @@ export class ArrClient {
   }
 }
 export class SonarrClient extends ArrClient {
-  async series() {
-    return z.array(seriesSchema).parse(await this.request("/series"));
+  async series(signal?: AbortSignal, seriesId?: number) {
+    if (seriesId)
+      return [
+        seriesSchema.parse(
+          await this.request(
+            `/series/${id.parse(seriesId)}`,
+            "GET",
+            undefined,
+            { signal },
+          ),
+        ),
+      ];
+    return this.list("/series", seriesSchema, signal);
   }
-  async episodes(seriesId: number) {
-    return z
-      .array(episodeSchema)
-      .parse(await this.request(`/episode?seriesId=${id.parse(seriesId)}`));
+  async episodes(seriesId: number, signal?: AbortSignal) {
+    return this.list(
+      `/episode?seriesId=${id.parse(seriesId)}`,
+      episodeSchema,
+      signal,
+    );
   }
-  async episodeFiles(seriesId: number) {
-    return z
-      .array(fileSchema)
-      .parse(await this.request(`/episodefile?seriesId=${id.parse(seriesId)}`));
+  async episodeFiles(seriesId: number, signal?: AbortSignal) {
+    return this.list(
+      `/episodefile?seriesId=${id.parse(seriesId)}`,
+      fileSchema,
+      signal,
+    );
   }
   async episodeFile(fileId: number) {
     return fileSchema.parse(
@@ -161,13 +198,23 @@ export class SonarrClient extends ArrClient {
   }
 }
 export class RadarrClient extends ArrClient {
-  async movies() {
-    return z.array(movieSchema).parse(await this.request("/movie"));
+  async movies(signal?: AbortSignal, movieId?: number) {
+    if (movieId)
+      return [
+        movieSchema.parse(
+          await this.request(`/movie/${id.parse(movieId)}`, "GET", undefined, {
+            signal,
+          }),
+        ),
+      ];
+    return this.list("/movie", movieSchema, signal);
   }
-  async movieFiles(movieId: number) {
-    return z
-      .array(fileSchema)
-      .parse(await this.request(`/moviefile?movieId=${id.parse(movieId)}`));
+  async movieFiles(movieId: number, signal?: AbortSignal) {
+    return this.list(
+      `/moviefile?movieId=${id.parse(movieId)}`,
+      fileSchema,
+      signal,
+    );
   }
   async movieFile(fileId: number) {
     return fileSchema.parse(

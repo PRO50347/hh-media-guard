@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — proposed 0.2.3
+
+- Resolve missing ffprobe language only with conservative, exact-file Sonarr/Radarr corroboration; retain commentary, descriptive-audio and contradiction protections.
+- Stream unpaged Arr library JSON into bounded compact records; retain response/deadline/SSRF limits, avoid redundant Radarr file requests, and support scoped catalog bypass.
+- Show structured fallback evidence and distinguish failed scans from media needing attention.
+- Add large authenticated HTTP libraries, generated AC3/und fixtures, cache and job-status regressions; extend production lifecycle evidence checks.
+
 ## 0.2.2
 
 - Fix wizard navigation losing unsaved Arr credentials, branding and policy edits; await saves, retain failed drafts, and reload persisted settings when revisiting steps. Extend production tests from wizard entry through authenticated generated-media library audits and container recreation.

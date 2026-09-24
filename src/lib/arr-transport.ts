@@ -1,3 +1,4 @@
+import { ArrArrayReader } from "./arr-array";
 import { SafeError } from "./safe-error";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
@@ -76,11 +77,19 @@ export type ArrTransport = (
   key: string,
   method: string,
   body?: unknown,
+  options?: { signal?: AbortSignal; project?: (value: unknown) => unknown },
 ) => Promise<unknown>;
 
 /** DNS answers are validated once and the selected address is pinned to the
  * socket lookup, closing the validation-to-connection rebinding window. */
-export const arrTransport: ArrTransport = async (url, key, method, body) => {
+export const arrTransport: ArrTransport = async (
+  url,
+  key,
+  method,
+  body,
+  options,
+) => {
+  options?.signal?.throwIfAborted();
   const host = url.hostname.replace(/^\[|\]$/g, "");
   let dnsTimer: ReturnType<typeof setTimeout> | undefined;
   const addresses = await Promise.race([
@@ -110,6 +119,7 @@ export const arrTransport: ArrTransport = async (url, key, method, body) => {
       "arr.address",
       "Service DNS resolves to a prohibited address",
     );
+  options?.signal?.throwIfAborted();
   const address = addresses[0];
   return new Promise((resolve, reject) => {
     const transport = url.protocol === "https:" ? https : http;
@@ -118,6 +128,7 @@ export const arrTransport: ArrTransport = async (url, key, method, body) => {
       url,
       {
         method,
+        signal: options?.signal,
         headers: {
           "X-Api-Key": key,
           Accept: "application/json",
@@ -134,9 +145,28 @@ export const arrTransport: ArrTransport = async (url, key, method, body) => {
         },
       },
       (response) => {
+        const ok =
+          (response.statusCode || 500) >= 200 &&
+          (response.statusCode || 500) < 300;
+        const reader =
+          ok && options?.project
+            ? new ArrArrayReader(options.project)
+            : undefined;
         const chunks: Buffer[] = [];
+        let failed = false;
         let size = 0;
         response.on("data", (chunk: Buffer) => {
+          if (failed) return;
+          if (reader) {
+            try {
+              reader.write(chunk);
+            } catch (error) {
+              failed = true;
+              reject(error);
+              request.destroy();
+            }
+            return;
+          }
           size += chunk.length;
           if (size > 4_000_000)
             request.destroy(
@@ -148,6 +178,7 @@ export const arrTransport: ArrTransport = async (url, key, method, body) => {
           else chunks.push(chunk);
         });
         response.on("end", () => {
+          if (failed) return;
           const status = response.statusCode || 500;
           if (status < 200 || status >= 300) {
             reject(
@@ -156,6 +187,14 @@ export const arrTransport: ArrTransport = async (url, key, method, body) => {
                 `Arr returned HTTP ${status}. ${status === 401 ? "API key rejected; check the key." : status === 403 ? "Access forbidden; check the API key and proxy permissions." : status === 404 ? "API endpoint not found; check the URL base/path and API v3 support." : status >= 300 && status < 400 ? "Redirect rejected; enter the final server URL including its URL base." : "Check service/proxy availability."}`,
               ),
             );
+            return;
+          }
+          if (reader) {
+            try {
+              resolve(reader.finish());
+            } catch (error) {
+              reject(error);
+            }
             return;
           }
           const text = Buffer.concat(chunks).toString("utf8");
@@ -188,8 +227,17 @@ export const arrTransport: ArrTransport = async (url, key, method, body) => {
             "Arr request timed out; check connectivity and service availability.",
           ),
         ),
-      8000,
+      options?.project ? 60000 : 8000,
     );
+    if (options?.project)
+      request.setTimeout(8000, () =>
+        request.destroy(
+          new SafeError(
+            "arr.timeout",
+            "Arr library response stalled; retry when the service is available.",
+          ),
+        ),
+      );
     request.on("close", () => clearTimeout(timer));
     request.on("error", (error) => reject(networkError(error)));
     request.end(payload);

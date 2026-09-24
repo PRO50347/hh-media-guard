@@ -44,6 +44,15 @@ http
       "/api/v3/config/downloadclient": { autoRedownloadFailed: false },
       "/api/v3/history": { records: [], totalRecords: 0 },
     };
+    const single = url.pathname.match(/^\/api\/v3\/(movie|series)\/(\d+)$/);
+    if (single) {
+      const record = routes[`/api/v3/${single[1]}`].find(
+        (item) => item.id === Number(single[2]),
+      );
+      if (!record) res.writeHead(404);
+      res.end(JSON.stringify(record || {}));
+      return;
+    }
     if (url.pathname === "/api/v3/moviefile") {
       const id = Number(url.searchParams.get("movieId"));
       res.end(

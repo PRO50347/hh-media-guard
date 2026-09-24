@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { jobStatusLabel } from "@/lib/job-status";
 import { Job } from "@/lib/types";
 import { api, json } from "./api";
 export function JobsView() {
@@ -34,7 +35,8 @@ export function JobsView() {
       {jobs.map((job) => (
         <article key={job.id}>
           <h2>
-            {job.kind} <span className={"badge " + job.state}>{job.state}</span>
+            {job.kind}{" "}
+            <span className={"badge " + job.state}>{jobStatusLabel(job)}</span>
           </h2>
           <p className="muted">
             {job.id} · Attempt {job.attempts} · {job.updatedAt}
@@ -49,6 +51,12 @@ export function JobsView() {
             {job.currentItem}
           </p>
           {job.error && <p className="error">{job.error}</p>}
+          {job.state === "failed" && !job.processed && (
+            <p>
+              No media inspection completed. This is a scan/setup failure, not a
+              media-language result.
+            </p>
+          )}
           {["queued", "running", "retrying"].includes(job.state) && (
             <button
               onClick={async () => {
