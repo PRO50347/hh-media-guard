@@ -64,8 +64,8 @@ describe("language evidence", () => {
   );
   it("does not conclusively fail missing audio", () =>
     expect(decideAudio(600, [], defaults()).decision).toBe("needs-analysis"));
-  it("unknown main audio overrides foreign-tag failures", () =>
+  it("known non-English audio with an unknown track fails without English evidence", () =>
     expect(
       decideAudio(600, [track("spa"), track("und")], defaults()).decision,
-    ).toBe("needs-analysis"));
+    ).toBe("fail"));
 });
