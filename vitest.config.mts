@@ -1,2 +1,5 @@
-import { defineConfig } from 'vitest/config';
-export default defineConfig({test:{include:['tests/**/*.test.ts'],setupFiles:['./tests/setup.ts']}});
+import { defineConfig } from "vitest/config";
+export default defineConfig({
+  resolve: { alias: { "@": new URL("./src", import.meta.url).pathname } },
+  test: { include: ["tests/**/*.test.ts"], setupFiles: ["./tests/setup.ts"] },
+});

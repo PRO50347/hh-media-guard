@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { completeWizard } from "./wizard-flow";
 const phase = process.env.UNRAID_PHASE || "fresh";
 const secret = (service: string) => `fixture-${service}-key`;
 test(`Unraid production connections and persistence: ${phase}`, async ({
@@ -14,9 +15,7 @@ test(`Unraid production connections and persistence: ${phase}`, async ({
       .fill("fixture-password-123");
     await page.getByRole("button", { name: "Create administrator" }).click();
     await expect(page.getByRole("heading", { name: /Set up/ })).toBeVisible();
-    for (let i = 0; i < 7; i++)
-      await page.getByRole("button", { name: "Continue", exact: true }).click();
-    await page.getByRole("button", { name: "Finish setup" }).click();
+    await completeWizard(page);
   } else {
     await page.getByLabel("Username").fill("fixture-admin");
     await page
@@ -26,7 +25,7 @@ test(`Unraid production connections and persistence: ${phase}`, async ({
   }
   await expect(
     page.getByRole("heading", {
-      name: phase === "fresh" ? "H&H Media Guard" : "Persistent Unraid Fixture",
+      name: phase === "fresh" ? "Wizard Brand" : "Persistent Unraid Fixture",
       exact: true,
     }),
   ).toBeVisible();
@@ -131,7 +130,8 @@ test(`Unraid production connections and persistence: ${phase}`, async ({
         async (service) => (await fetch(`/api/integrations/${service}`)).json(),
         service,
       );
-      expect(unsaved.apiKeyConfigured).toBe(false);
+      expect(unsaved.apiKeyConfigured).toBe(true);
+      expect(unsaved.url).toBe(url + "/base/");
       await card.getByRole("button", { name: `Save ${service}` }).click();
       await expect(card.getByLabel("API key")).toHaveValue("");
       await page.reload();
@@ -160,13 +160,11 @@ test(`Unraid production connections and persistence: ${phase}`, async ({
     const png = await page.screenshot({
       clip: { x: 0, y: 0, width: 16, height: 16 },
     });
-    await page
-      .getByLabel("Main logo", { exact: true })
-      .setInputFiles({
-        name: "fixture.png",
-        mimeType: "image/png",
-        buffer: png,
-      });
+    await page.getByLabel("Main logo", { exact: true }).setInputFiles({
+      name: "fixture.png",
+      mimeType: "image/png",
+      buffer: png,
+    });
     await expect(page.getByLabel("Main logo", { exact: true })).toBeEnabled();
     await expect(
       page.getByLabel("Application name", { exact: true }),
@@ -175,6 +173,41 @@ test(`Unraid production connections and persistence: ${phase}`, async ({
     await expect(
       page.getByLabel("Application name", { exact: true }),
     ).toHaveValue("Persistent Unraid Fixture");
+  if (phase !== "wrong-key") {
+    // Real UI queues real worker jobs, which must authenticate every enumeration request.
+    for (const source of ["sonarr", "radarr"]) {
+      await page.goto("/library");
+      await page
+        .getByRole("combobox", { name: "Integration", exact: true })
+        .selectOption(source);
+      const queued = page.waitForResponse(
+        (response) =>
+          response.url().endsWith("/api/jobs") &&
+          response.request().method() === "POST",
+      );
+      await page.getByRole("button", { name: "Start library audit" }).click();
+      const job = await (await queued).json();
+      await expect
+        .poll(async () =>
+          page.evaluate(
+            async (id) =>
+              (await (await fetch("/api/jobs")).json()).find(
+                (row: { id: string }) => row.id === id,
+              ),
+            job.id,
+          ),
+        )
+        .toMatchObject({ state: "completed", total: 1, processed: 1 });
+      await page.goto(source === "sonarr" ? "/tv" : "/movies");
+      await expect(
+        page.getByText(
+          source === "sonarr" ? /Wizard Episode/ : "Wizard Movie",
+          { exact: false },
+        ),
+      ).toBeVisible();
+      await expect(page.getByText("pass", { exact: true })).toBeVisible();
+    }
+  }
   const logo = await request.get("/api/branding/logo");
   expect(logo.ok()).toBe(true);
   expect(logo.headers()["content-type"]).toContain("image/png");

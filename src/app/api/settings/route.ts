@@ -18,10 +18,10 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     await requireAdmin(true);
-    const settings = settingsSchema.parse({
-      ...getSettings(),
-      ...Object(await jsonBody(request)),
-    });
+    // Read current settings after the asynchronous body read. Otherwise a
+    // concurrent save can be overwritten by this request's stale snapshot.
+    const patch = Object(await jsonBody(request));
+    const settings = settingsSchema.parse({ ...getSettings(), ...patch });
     if (
       settings.safetyMode !== "monitor" &&
       process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true"

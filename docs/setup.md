@@ -1,6 +1,8 @@
 # Setup and path mappings
 
-Start with Monitor Only and read-only media mounts. Set a persistent `/config`, a canonical 32-byte base64 `ENCRYPTION_KEY` (`openssl rand -base64 32`), and `APP_URL` to the exact browser origin, including scheme and port. Open that URL, create the local administrator, and complete the setup wizard. Configure integrations and paths in Settings afterward; neither Sonarr nor Radarr is mandatory.
+Start with Monitor Only and read-only media mounts. Set a persistent `/config`, a canonical 32-byte base64 `ENCRYPTION_KEY` (`openssl rand -base64 32`), and `APP_URL` to the exact browser origin, including scheme and port. Open that URL, create the local administrator, and complete the setup wizard. Configure integrations and paths in the wizard or Settings; neither Sonarr nor Radarr is mandatory.
+
+Wizard Continue and Back save branding, integration and language-policy forms and await the server before changing steps. Failed validation or saves keep the form and its entered values visible. Save buttons remain available. Test Connection alone does not persist a new key; Continue or Save does. Images upload immediately; wait for completion before navigating. Path mappings still require Add/Update explicitly. Reopening a step reads persisted values; passwords remain blank because saved keys are write-only. Reloading the wizard returns to Welcome with already-saved settings intact. Typing without Save/Continue/Back and then closing or reloading the page does not save an unfinished draft.
 
 Enter each integration's base URL and API key, then Test connection before saving. Tests use the current form values without persisting them. After Save/reload a blank API-key field uses the decrypted existing key. Remove clears the integration credentials. See [Unraid networking and setup](unraid.md) for bridge-mode addresses, URL bases and diagnostic guidance.
 

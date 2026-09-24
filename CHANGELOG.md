@@ -2,6 +2,8 @@
 
 ## Unreleased — planned 0.2.2
 
+- Fix wizard navigation losing unsaved Arr credentials, branding and policy edits; await saves, retain failed drafts, and reload persisted settings when revisiting steps. Extend production tests from wizard entry through authenticated generated-media library audits and container recreation.
+
 - Fix fresh Unraid appdata permissions with scoped initialization and a non-root PUID/PGID runtime; preserve existing 100:101 defaults. Never recurse into media.
 - Add distinct, secret-safe startup and Arr connection diagnostics.
 - Fix Sonarr/Radarr unsaved Test Connection, verify the correct service and preserve encrypted saved-key testing across restarts.

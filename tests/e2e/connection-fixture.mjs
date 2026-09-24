@@ -22,6 +22,33 @@ const handler = (service) => (req, res) => {
   }
   if (req.headers["x-api-key"] !== `fixture-${service.toLowerCase()}-key`)
     return reply(401, { error: "rejected secret must never be returned" });
+  const library =
+    service === "Sonarr"
+      ? {
+          "/api/v3/series": [{ id: 10, title: "Wizard Show", path: "/arr/tv" }],
+          "/api/v3/episode": [
+            {
+              id: 11,
+              seriesId: 10,
+              episodeFileId: 111,
+              seasonNumber: 1,
+              episodeNumber: 1,
+              title: "Wizard Episode",
+            },
+          ],
+          "/api/v3/episodefile": [
+            { id: 111, seriesId: 10, path: "/arr/tv/sonarr.mka" },
+          ],
+        }
+      : {
+          "/api/v3/movie": [
+            { id: 1, title: "Wizard Movie", hasFile: true, year: 2026 },
+          ],
+          "/api/v3/moviefile": [
+            { id: 101, movieId: 1, path: "/arr/movies/radarr.mka" },
+          ],
+        };
+  if (library[pathname]) return reply(200, library[pathname]);
   if (pathname !== "/api/v3/system/status") return reply(404, {});
   reply(200, {
     appName: service,
