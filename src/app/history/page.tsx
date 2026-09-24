@@ -23,25 +23,35 @@ export default async function History() {
               {scan.languageEvidence && (
                 <dl>
                   <dt>Language source</dt>
-                  <dd>{scan.languageEvidence.source}</dd>
+                  <dd>
+                    {scan.languageEvidence.source === "sonarr"
+                      ? "Sonarr exact-file metadata"
+                      : scan.languageEvidence.source === "radarr"
+                        ? "Radarr exact-file metadata"
+                        : scan.languageEvidence.source}
+                  </dd>
                   {scan.languageEvidence.arr && (
                     <>
-                      <dt>ffprobe language</dt>
-                      <dd>{scan.languageEvidence.ffprobeLanguage}</dd>
                       <dt>Arr file language</dt>
                       <dd>{scan.languageEvidence.arr.languages.join(", ")}</dd>
-                      <dt>Audio track</dt>
-                      <dd>{scan.languageEvidence.trackIndex}</dd>
-                      <dt>Default / commentary / descriptive</dt>
-                      <dd>
-                        {[
-                          scan.languageEvidence.isDefault,
-                          scan.languageEvidence.isCommentary,
-                          scan.languageEvidence.isDescriptive,
-                        ]
-                          .map((v) => (v ? "yes" : "no"))
-                          .join(" / ")}
-                      </dd>
+                      <dt>ffprobe language (diagnostic)</dt>
+                      <dd>{scan.languageEvidence.ffprobeLanguage}</dd>
+                      {scan.languageEvidence.trackIndex !== undefined && (
+                        <>
+                          <dt>Audio track</dt>
+                          <dd>{scan.languageEvidence.trackIndex}</dd>
+                          <dt>Default / commentary / descriptive</dt>
+                          <dd>
+                            {[
+                              scan.languageEvidence.isDefault,
+                              scan.languageEvidence.isCommentary,
+                              scan.languageEvidence.isDescriptive,
+                            ]
+                              .map((v) => (v ? "yes" : "no"))
+                              .join(" / ")}
+                          </dd>
+                        </>
+                      )}
                     </>
                   )}
                 </dl>

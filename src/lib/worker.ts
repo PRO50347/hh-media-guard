@@ -162,6 +162,8 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
         "needs-attention",
         "Policy action requires attention",
       );
+    if (scan.decision === "fail")
+      needsAttention(input, "missing required language", scan);
     if (scan.decision === "needs-analysis")
       needsAttention(input, "unknown language", scan);
   } catch (error) {
@@ -268,7 +270,7 @@ async function auditLibrary(
           if (scan.decision === "pass")
             raw()
               .prepare(
-                "UPDATE attention SET state='resolved' WHERE subject IN (?,?) AND reason='unknown language' AND state='open'",
+                "UPDATE attention SET state='resolved' WHERE subject IN (?,?) AND reason IN ('unknown language','missing required language') AND state='open'",
               )
               .run(mediaId, scan.path);
           raw()
@@ -276,6 +278,11 @@ async function auditLibrary(
               "UPDATE media_items SET fingerprint=?,decision=?,last_scanned_at=? WHERE id=?",
             )
             .run(scan.fingerprint, scan.decision, scan.scannedAt, mediaId);
+          if (scan.decision === "fail")
+            needsAttention(mediaId, "missing required language", {
+              item,
+              scan,
+            });
           if (scan.decision === "needs-analysis")
             needsAttention(mediaId, "unknown language", { item, scan });
           if ((await applyPolicy(scan, item, signal)) === false) failures++;

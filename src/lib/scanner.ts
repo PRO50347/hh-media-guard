@@ -89,7 +89,7 @@ export async function fingerprint(
   ];
   return createHash("sha256")
     .update(
-      JSON.stringify([file, info.size, info.mtimeMs, identity, policy, 3]),
+      JSON.stringify([file, info.size, info.mtimeMs, identity, policy, 4]),
     )
     .digest("hex");
 }

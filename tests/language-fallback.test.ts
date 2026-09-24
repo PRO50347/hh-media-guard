@@ -1,5 +1,7 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { decideAudio } from "../src/lib/rules";
+// These rule/identity tests do not use persistence.
+vi.mock("../src/lib/store", () => ({ listMappings: () => [] }));
 import { matchingFileEvidence } from "../src/lib/library";
 import {
   defaults,
@@ -29,30 +31,54 @@ const arr = (source: "sonarr" | "radarr" = "sonarr"): ArrLanguageEvidence => ({
     "/Media/TV SHOW'S/Rugrats (1991)/Season 01/Rugrats - S01E04 - At The Movies.mkv",
   languages: ["English"],
 });
-it("preserves normal explicitly English decisions regardless of Arr classification", () => {
-  expect(
-    decideAudio(600, [track({ language: "eng" })], defaults(), {
-      ...arr(),
-      languages: ["Spanish"],
-    }),
-  ).toMatchObject({
-    decision: "pass",
-    languageEvidence: { source: "ffprobe" },
-  });
-});
 it.each(["sonarr", "radarr"] as const)(
-  "resolves a Rugrats-style AC3 default und stream with exact %s evidence",
+  "uses %s exact-file metadata before ffprobe",
   (source) => {
-    expect(decideAudio(600, [track()], defaults(), arr(source))).toMatchObject({
-      decision: "pass",
-      languageEvidence: {
-        source: `${source}-fallback`,
-        ffprobeLanguage: "und",
-        isDefault: true,
-        isCommentary: false,
-        isDescriptive: false,
-      },
-    });
+    for (const languages of [
+      ["English"],
+      ["English", "Spanish"],
+      ["Unknown", "English"],
+    ]) {
+      for (const language of ["und", "eng", "spa"]) {
+        const result = decideAudio(600, [track({ language })], defaults(), {
+          ...arr(source),
+          languages,
+        });
+        expect(result).toMatchObject({
+          decision: "pass",
+          languageEvidence: { source },
+        });
+        expect(result.reason).not.toContain("unknown");
+      }
+    }
+    for (const language of ["und", "eng", "deu"]) {
+      expect(
+        decideAudio(600, [track({ language })], defaults(), {
+          ...arr(source),
+          languages: ["German"],
+        }),
+      ).toMatchObject({
+        decision: "fail",
+        reason: `${source === "sonarr" ? "Sonarr" : "Radarr"} reports no required eng audio in this exact file.`,
+      });
+    }
+  },
+);
+it.each([undefined, [], ["Unknown"], ["und"]])(
+  "uses ffprobe when Arr language is unusable: %j",
+  (languages) => {
+    const evidence = languages ? { ...arr(), languages } : undefined;
+    expect(
+      decideAudio(600, [track({ language: "eng" })], defaults(), evidence)
+        .decision,
+    ).toBe("pass");
+    expect(
+      decideAudio(600, [track({ language: "deu" })], defaults(), evidence)
+        .decision,
+    ).toBe("fail");
+    expect(decideAudio(600, [track()], defaults(), evidence).decision).toBe(
+      "needs-analysis",
+    );
   },
 );
 it.each([
@@ -78,31 +104,7 @@ it("allows descriptive fallback only when explicitly accepted", () => {
     ).decision,
   ).toBe("pass");
 });
-it("does not override an explicitly Spanish main track", () => {
-  expect(
-    decideAudio(600, [track({ language: "spa" })], defaults(), arr()).decision,
-  ).toBe("fail");
-  expect(
-    decideAudio(
-      600,
-      [track(), track({ index: 1, language: "spa", isDefault: false })],
-      defaults(),
-      arr(),
-    ).decision,
-  ).toBe("needs-analysis");
-});
-it("keeps absent, unknown and multilingual Arr evidence unresolved", () => {
-  for (const evidence of [
-    undefined,
-    { ...arr(), languages: [] },
-    { ...arr(), languages: ["Unknown"] },
-    { ...arr(), languages: ["English", "Spanish"] },
-  ])
-    expect(decideAudio(600, [track()], defaults(), evidence).decision).toBe(
-      "needs-analysis",
-    );
-});
-it("requires an unambiguous candidate even with a default track", () => {
+it("does not make known file language unknown because multiple tracks are untagged", () => {
   expect(
     decideAudio(
       600,
@@ -110,7 +112,7 @@ it("requires an unambiguous candidate even with a default track", () => {
       defaults(),
       arr(),
     ).decision,
-  ).toBe("needs-analysis");
+  ).toBe("pass");
 });
 it("does not infer anything without program duration", () => {
   expect(decideAudio(undefined, [track()], defaults(), arr()).decision).toBe(
@@ -136,7 +138,7 @@ it("keeps existing commentary title detection", () => {
   expect(isCommentary("Director's Commentary")).toBe(true);
   expect(isCommentary("Stereo")).toBe(false);
 });
-it("does not reinterpret unrecognized explicit language tags as missing metadata", () => {
+it("uses known Arr language even when ffprobe has an unrecognized tag", () => {
   expect(
     decideAudio(
       600,
@@ -144,5 +146,5 @@ it("does not reinterpret unrecognized explicit language tags as missing metadata
       defaults(),
       arr(),
     ).decision,
-  ).toBe("needs-analysis");
+  ).toBe("pass");
 });

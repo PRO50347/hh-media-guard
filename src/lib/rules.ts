@@ -36,67 +36,56 @@ export function decideAudio(
   const main = tracks.filter(
     (track) =>
       !track.isCommentary &&
-      (policy.allowDescriptive || !track.isDescriptive) &&
+      !isCommentary(track.title) &&
+      !track.isForced &&
+      (policy.allowDescriptive ||
+        (!track.isDescriptive && !isDescriptive(track.title))) &&
       (!track.duration || track.duration >= duration * 0.9),
   );
-  if (
-    main.some((track) => required.includes(normalizeLanguage(track.language)))
-  ) {
+  const languages = [
+    ...new Set((arr?.languages || []).map(normalizeLanguage)),
+  ].filter((language) => language !== "und");
+  if (arr && languages.length && required.length) {
+    const service = arr.source === "sonarr" ? "Sonarr" : "Radarr";
+    const present = languages.some((language) => required.includes(language));
     return {
-      decision: "pass",
-      reason: `Required main-program audio verified: ${required.join(", ")}`,
-      languageEvidence: { source: "ffprobe" },
-    };
-  }
-  // File-level classification cannot identify a track in a multilingual file.
-  // Require exactly one eligible unknown track and no explicit contradiction.
-  const candidates = main.filter(
-    (track) =>
-      !track.isForced &&
-      !isCommentary(track.title) &&
-      (policy.allowDescriptive || !isDescriptive(track.title)),
-  );
-  const languages = [...new Set(arr?.languages.map(normalizeLanguage) || [])];
-  const candidate = candidates[0];
-  if (
-    arr &&
-    candidates.length === 1 &&
-    candidate &&
-    normalizeLanguage(candidate.language) === "und" &&
-    ["", "und", "unknown", "undefined"].includes(
-      (candidate.rawLanguage ?? candidate.language).trim().toLowerCase(),
-    ) &&
-    (candidate.isDefault || tracks.length === 1) &&
-    main.every((track) => normalizeLanguage(track.language) === "und") &&
-    languages.length === 1 &&
-    languages[0] !== "und" &&
-    required.includes(languages[0])
-  ) {
-    return {
-      decision: "pass",
-      reason: `Required audio resolved by ${arr.source === "sonarr" ? "Sonarr" : "Radarr"} exact-file fallback for missing stream language metadata.`,
+      decision: present && main.length ? "pass" : "fail",
+      reason: !present
+        ? `${service} reports no required ${required.join("/")} audio in this exact file.`
+        : !main.length
+          ? `${service} reports required audio, but no eligible main-program audio track was found (commentary, descriptive, forced or short audio excluded).`
+          : `${service} reports required ${required.join("/")} audio in this exact file.`,
       languageEvidence: {
-        source: `${arr.source}-fallback`,
-        trackIndex: candidate.index,
-        ffprobeLanguage: candidate.language,
+        source: arr.source,
         arr,
-        isDefault: candidate.isDefault,
-        isCommentary: candidate.isCommentary,
-        isDescriptive: candidate.isDescriptive,
+        ffprobeLanguage: tracks.map((track) => track.language).join(", "),
       },
     };
   }
+  const known = main
+    .map((track) => normalizeLanguage(track.language))
+    .filter((language) => language !== "und");
   if (
-    !required.length ||
-    main.some((track) => normalizeLanguage(track.language) === "und")
+    required.length &&
+    known.some((language) => required.includes(language))
   ) {
     return {
+      decision: "pass",
+      reason: `Required main-program audio verified by ffprobe: ${required.join(", ")}`,
+      languageEvidence: { source: "ffprobe" },
+    };
+  }
+  if (!required.length || (main.length && !known.length)) {
+    return {
       decision: "needs-analysis",
-      reason: "Main-program audio has unknown language metadata.",
+      reason:
+        "Neither Arr nor ffprobe provides usable main-program language metadata.",
+      languageEvidence: { source: "ffprobe" },
     };
   }
   return {
     decision: "fail",
-    reason: `No acceptable ${required.join("/")} main-program audio track was found.`,
+    reason: `No acceptable ${required.join("/")} main-program audio track was found by ffprobe.`,
+    languageEvidence: { source: "ffprobe" },
   };
 }

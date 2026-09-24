@@ -33,7 +33,12 @@ export interface ArrLanguageEvidence {
   languages: string[];
 }
 export interface LanguageEvidence {
-  source: "ffprobe" | "sonarr-fallback" | "radarr-fallback";
+  source:
+    | "ffprobe"
+    | "sonarr"
+    | "radarr"
+    | "sonarr-fallback"
+    | "radarr-fallback";
   trackIndex?: number;
   ffprobeLanguage?: string;
   arr?: ArrLanguageEvidence;

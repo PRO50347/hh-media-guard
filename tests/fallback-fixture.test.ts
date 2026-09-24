@@ -42,7 +42,7 @@ it("inspects generated Rugrats-style stereo AC3 with actual ffprobe and exact fi
       });
       expect(resolved).toMatchObject({
         decision: "pass",
-        languageEvidence: { source: `${source}-fallback` },
+        languageEvidence: { source },
       });
       expect(resolved.tracks[0]).toMatchObject({
         codec: "ac3",
