@@ -2,7 +2,7 @@
 
 H&H Media Guard is a self-hosted companion for Sonarr and Radarr that validates downloaded media audio language metadata with `ffprobe`. It is designed to catch releases that lack usable required-language **main-program** audio—not merely an English commentary or short bonus track.
 
-> **v0.2.1 defaults to Monitor Only.** It scans, records, and reports. Quarantine and Automatic modes require explicit UI selection, writable mounts and the separate environment safety switch.
+> **v0.2.2 defaults to Monitor Only.** It scans, records, and reports. Quarantine and Automatic modes require explicit UI selection, writable mounts and the separate environment safety switch.
 
 ## Install
 
@@ -48,7 +48,7 @@ Screenshots will be added after the initial public release. The dashboard is int
 
 ## Project status
 
-0.2.1 includes Arr enumeration, secure administration, branding, durable audits, quarantine/restore and automatic remediation validated with mocked Arr services. Replacement search is not proof of a passing replacement: subsequent imported-file inspection verifies it. Optional speech detection remains an interface only; no AI model or detector adapter is installed.
+0.2.2 includes Arr enumeration, secure administration, branding, durable audits, quarantine/restore and automatic remediation validated with mocked Arr services. Replacement search is not proof of a passing replacement: subsequent imported-file inspection verifies it. Optional speech detection remains an interface only; no AI model or detector adapter is installed.
 
 ## License
 
