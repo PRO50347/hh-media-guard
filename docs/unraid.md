@@ -1,6 +1,6 @@
 # Unraid installation and updates
 
-Import `unraid/hh-media-guard.xml` as a local template; Community Applications listing is not assumed. These instructions describe the planned v0.2.2 changes on main, not the immutable v0.2.1 image.
+Import `unraid/hh-media-guard.xml` as a local template; Community Applications listing is not assumed. These instructions describe v0.2.2; older immutable images retain their original behavior.
 
 Supply these values:
 

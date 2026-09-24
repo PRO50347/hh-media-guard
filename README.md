@@ -14,7 +14,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-Before starting, generate `ENCRYPTION_KEY` with `openssl rand -base64 32`, set `APP_URL` and media paths in `.env`, and use a dedicated `./config` bind mount. Main includes planned v0.2.2 scoped appdata initialization followed by non-root runtime; see the [Docker guide](docs/docker.md) for existing-image behavior.
+Before starting, generate `ENCRYPTION_KEY` with `openssl rand -base64 32`, set `APP_URL` and media paths in `.env`, and use a dedicated `./config` bind mount. v0.2.2 includes scoped appdata initialization followed by non-root runtime; see the [Docker guide](docs/docker.md) for existing-image behavior.
 
 Open `http://localhost:3938`, complete the setup wizard, and mount media read-only. On Unraid, import [the CA template](unraid/hh-media-guard.xml); see [Unraid guide](docs/unraid.md).
 
