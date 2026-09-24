@@ -215,7 +215,12 @@ test(`Unraid production connections and persistence: ${phase}`, async ({
         .first();
       await evidence.locator("summary").first().click();
       await expect(
-        evidence.getByText(`${source}-fallback`, { exact: true }),
+        evidence.getByText(
+          source === "sonarr"
+            ? "Sonarr exact-file metadata"
+            : "Radarr exact-file metadata",
+          { exact: true },
+        ),
       ).toBeVisible();
       await expect(
         evidence.getByText("English", { exact: true }),
