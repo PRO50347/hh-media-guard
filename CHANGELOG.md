@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — proposed 0.2.3
+## 0.2.3
 
 - Resolve missing ffprobe language only with conservative, exact-file Sonarr/Radarr corroboration; retain commentary, descriptive-audio and contradiction protections.
 - Stream unpaged Arr library JSON into bounded compact records; retain response/deadline/SSRF limits, avoid redundant Radarr file requests, and support scoped catalog bypass.
