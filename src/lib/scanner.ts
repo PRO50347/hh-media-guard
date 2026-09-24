@@ -4,7 +4,7 @@ import { z } from "zod";
 import { isCommentary, isDescriptive, normalizeLanguage } from "./language";
 import { decideAudio } from "./rules";
 import { getSettings } from "./store";
-import { runProcess } from "./process";
+import { runProcess, InspectionError } from "./process";
 import type {
   ScanResult,
   AudioTrack,
@@ -39,29 +39,41 @@ export function parseProbe(text: string): Probe {
   try {
     return probeSchema.parse(JSON.parse(text));
   } catch {
-    throw new Error("Media inspection returned malformed metadata");
+    throw new InspectionError("Media inspection returned malformed metadata", {
+      stage: "parse",
+      category: "invalid-json-or-schema",
+      stdoutBytes: Buffer.byteLength(text),
+    });
   }
 }
 export async function probe(
   file: string,
   signal?: AbortSignal,
 ): Promise<Probe> {
-  const output = await runProcess(
-    "ffprobe",
-    [
-      "-v",
-      "error",
-      "-protocol_whitelist",
-      "file",
-      "-show_format",
-      "-show_streams",
-      "-of",
-      "json",
-      file,
-    ],
-    { signal },
-  );
-  return parseProbe(output);
+  const inspect = () =>
+    runProcess(
+      "ffprobe",
+      [
+        "-v",
+        "error",
+        "-protocol_whitelist",
+        "file",
+        "-show_format",
+        "-show_streams",
+        "-of",
+        "json",
+        file,
+      ],
+      { signal },
+    );
+  try {
+    return parseProbe(await inspect());
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (!(error instanceof InspectionError) || !error.retryable) throw error;
+    // Exactly one retry, after the first child has closed; parse/policy errors never retry.
+    return parseProbe(await inspect());
+  }
 }
 export async function fingerprint(
   file: string,

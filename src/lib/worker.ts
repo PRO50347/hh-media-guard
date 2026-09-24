@@ -1,3 +1,4 @@
+import { InspectionError } from "./process";
 import {
   integration,
   integrationKey,
@@ -167,6 +168,9 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
     if (!signal.aborted)
       needsAttention(input, "scanner failure", {
         error: error instanceof Error ? error.message : "Inspection failed",
+        ...(error instanceof InspectionError
+          ? { diagnostics: error.diagnostics }
+          : {}),
       });
     throw error;
   }
@@ -281,6 +285,9 @@ async function auditLibrary(
         needsAttention(mediaId, "scanner failure", {
           item,
           error: error instanceof Error ? error.message : "Inspection failed",
+          ...(error instanceof InspectionError
+            ? { diagnostics: error.diagnostics }
+            : {}),
         });
         failures++;
       }
