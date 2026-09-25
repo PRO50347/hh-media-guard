@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.4
+
+- Preserve bounded ffprobe/process diagnostics for inspection failures.
+- Retry recognized transient inspection failures once.
+- Use exact-file Sonarr/Radarr (Arr) language metadata as the primary language evidence.
+- Pass English and multilingual audio that includes English; flag known non-English audio without English as needing attention.
+- Fall back to ffprobe language metadata only when Arr language metadata is unavailable.
+- Do not let ffprobe `und` override known Arr language metadata.
+
 ## 0.2.3
 
 - Resolve missing ffprobe language only with conservative, exact-file Sonarr/Radarr corroboration; retain commentary, descriptive-audio and contradiction protections.
