@@ -11,7 +11,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN MG_BUILD=1 npm run build
 FROM node:20-alpine AS runner
 WORKDIR /app
-ARG APP_VERSION=0.2.4
+ARG APP_VERSION=0.2.5
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="H&H Media Guard" org.opencontainers.image.description="Safe audio language validation" org.opencontainers.image.source="https://github.com/PRO50347/hh-media-guard" org.opencontainers.image.licenses="MIT" org.opencontainers.image.version="${APP_VERSION}" org.opencontainers.image.revision="${VCS_REF}"
 ENV NODE_ENV=production PORT=3938 HOSTNAME=0.0.0.0 CONFIG_DIR=/config ALLOW_DESTRUCTIVE_ACTIONS=false APP_VERSION=${APP_VERSION} NEXT_MANUAL_SIG_HANDLE=true NEXT_TELEMETRY_DISABLED=1

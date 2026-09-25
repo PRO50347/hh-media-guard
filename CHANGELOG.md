@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.5
+
+- Make dashboard summary cards clickable shortcuts, with keyboard navigation and hover/focus affordances.
+- Link Verified directly to filtered library results, and Wrong Language, Needs Analysis, and Needs Attention directly to their filtered work queues.
+- Redesign Needs Attention as a work queue with All / Movies / TV Shows filtering, reason and status filters, and URL-linked filter state.
+- Calculate full-dataset summary and filter counts in the database instead of limiting counts to the first 500 attention items.
+- Send only 25 full attention records to the browser per page, with pagination and clearer media title, type, source, and reason information.
+- Preserve existing attention actions: Rescan, Retry title audit, Reset title limits, Manually accept, and Ignore.
+
 ## 0.2.4
 
 - Preserve bounded ffprobe/process diagnostics for inspection failures.
