@@ -191,7 +191,10 @@ test("production administration, mapped audits, branding and safe restore", asyn
   await expect(page.getByText(/Generated Pilot/)).toBeVisible();
   await page.goto("/attention");
   await expect(
-    page.getByRole("heading", { name: /unknown language/ }),
+    page
+      .locator("section.attention-item")
+      .filter({ has: page.getByText("Reason: unknown language", { exact: true }) })
+      .first(),
   ).toBeVisible();
   await page.goto("/history");
   await expect(
@@ -232,16 +235,18 @@ test("production administration, mapped audits, branding and safe restore", asyn
   await expect(page.getByText("File restored", { exact: true })).toBeVisible();
   await page.goto("/attention");
   const unknown = page
-    .locator("section")
-    .filter({ has: page.getByRole("heading", { name: /unknown language/ }) })
+    .locator("section.attention-item")
+    .filter({ has: page.getByText("Reason: unknown language", { exact: true }) })
     .first();
   page.once("dialog", (dialog) => dialog.accept());
   await unknown.getByRole("button", { name: "Ignore", exact: true }).click();
-  await page.getByLabel("Attention status").selectOption("");
+  await page.getByLabel("Attention status").selectOption("all");
   await expect(unknown).toContainText("ignored");
   page.once("dialog", (dialog) => dialog.accept());
   await unknown.getByRole("button", { name: "Reset title limits" }).click();
-  await expect(page.getByRole("status")).toHaveText("Action recorded");
+  await expect(
+    page.getByRole("status").filter({ hasText: "Action recorded" }),
+  ).toHaveText("Action recorded");
   await page.goto("/settings");
   for (const source of ["Sonarr", "Radarr"]) {
     const card = page.locator("section").filter({
