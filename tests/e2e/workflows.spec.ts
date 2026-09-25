@@ -155,7 +155,9 @@ test("production administration, mapped audits, branding and safe restore", asyn
   });
   await page.goto("/library");
   await page.getByRole("button", { name: "Start library audit" }).click();
-  await expect(page.getByRole("status")).toContainText("Queued job");
+  await expect(page.locator('main > [role="status"]')).toContainText(
+    "Queued job",
+  );
   await page.goto("/jobs");
   await expect(page.getByText("completed", { exact: true })).toBeVisible();
   // Series ID 10 differs from episode ID 11: this catches accidental episode filtering.
@@ -166,7 +168,9 @@ test("production administration, mapped audits, branding and safe restore", asyn
   await page.getByLabel("Series / movie ID (optional)").fill("10");
   await page.getByLabel("Season (optional)").fill("1");
   await page.getByRole("button", { name: "Start library audit" }).click();
-  await expect(page.getByRole("status")).toContainText("Queued job");
+  await expect(page.locator('main > [role="status"]')).toContainText(
+    "Queued job",
+  );
   await expect
     .poll(async () => {
       const jobs = await page.evaluate(async () =>
@@ -211,7 +215,9 @@ test("production administration, mapped audits, branding and safe restore", asyn
     .getByLabel("Container-visible media path")
     .fill("/movies/spanish.mka");
   await page.getByRole("button", { name: "Queue file scan" }).click();
-  await expect(page.getByRole("status")).toContainText("Queued job");
+  await expect(page.locator('main > [role="status"]')).toContainText(
+    "Queued job",
+  );
   await expect
     .poll(async () => {
       await page.goto("/quarantine");
