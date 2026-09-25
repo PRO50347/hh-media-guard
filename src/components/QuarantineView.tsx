@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { api, json } from "./api";
 export function QuarantineView({
   items,
+  cleanupDisabledReason,
 }: {
   items: {
     id: string;
@@ -12,7 +13,9 @@ export function QuarantineView({
     state: string;
     created_at: string;
     evidence: string;
+    cleanup_ready?: number;
   }[];
+  cleanupDisabledReason?: string;
 }) {
   const [message, setMessage] = useState("");
   const router = useRouter();
@@ -61,6 +64,39 @@ export function QuarantineView({
             >
               Restore file
             </button>
+            {item.state === "quarantined" && !!item.cleanup_ready && (
+              <div>
+                <button
+                  disabled={!!cleanupDisabledReason}
+                  onClick={async () => {
+                    if (
+                      !confirm(
+                        "Permanently remove this quarantined failed copy? A verified PASS replacement must still exist and match Arr. This removes the recovery copy and cannot be undone.",
+                      )
+                    )
+                      return;
+                    try {
+                      await api(
+                        "/api/quarantine",
+                        json("DELETE", { id: item.id }),
+                      );
+                      setMessage(
+                        "Failed copy removed after replacement verification",
+                      );
+                    } catch (error) {
+                      setMessage((error as Error).message);
+                    }
+                    router.refresh();
+                  }}
+                >
+                  Remove failed copy
+                </button>
+                <p className="muted">
+                  {cleanupDisabledReason ||
+                    "Replacement verified. Cleanup is optional; retain this copy if you still need recovery."}
+                </p>
+              </div>
+            )}
           </section>
         ))
       ) : (

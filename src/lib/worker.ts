@@ -1,3 +1,5 @@
+import { loadManualRemediation } from "./manual-remediation";
+import { requireRemediationAllowed } from "./remediation";
 import { InspectionError } from "./process";
 import {
   integration,
@@ -102,6 +104,60 @@ function owns(job: LeasedJob, signal: AbortSignal) {
 }
 
 export async function executeJob(job: LeasedJob, signal: AbortSignal) {
+  if (job.kind === "remediate") {
+    const payload = JSON.parse(job.payload) as {
+      mediaId: string;
+      fingerprint: string;
+      identity: MediaIdentity;
+    };
+    try {
+      owns(job, signal);
+      requireRemediationAllowed();
+      const { scan, identity } = loadManualRemediation(payload.mediaId);
+      if (
+        scan.fingerprint !== payload.fingerprint ||
+        (
+          [
+            "source",
+            "entityId",
+            "fileId",
+            "seriesId",
+            "arrPath",
+            "downloadId",
+          ] as const
+        ).some((key) => identity[key] !== payload.identity[key])
+      )
+        throw new Error(
+          "Media identity or evidence changed after the request. Rescan first.",
+        );
+      jobQueue.progress(
+        job,
+        10,
+        "Fixing: validating and quarantining failed media",
+      );
+      const result = await remediate(scan, identity, undefined, signal, () =>
+        owns(job, signal),
+      );
+      owns(job, signal);
+      jobQueue.finish(
+        job,
+        result === "needs-attention" ? "needs-attention" : "completed",
+        result === "needs-attention"
+          ? "Remediation requires attention; inspect the operation evidence"
+          : undefined,
+      );
+    } catch (error) {
+      if (signal.aborted) throw error;
+      const message =
+        error instanceof Error ? error.message : "Remediation refused";
+      needsAttention(job.id, "manual remediation refused", {
+        mediaId: payload.mediaId,
+        reason: message,
+      });
+      jobQueue.finish(job, "needs-attention", message);
+    }
+    return;
+  }
   if (job.kind === "scan-library") {
     await auditLibrary(job, JSON.parse(job.payload) as AuditScope, signal);
     return;

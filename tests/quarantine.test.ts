@@ -169,6 +169,14 @@ describe("durable quarantine and restore", () => {
     expect(quarantine(id)?.state).toBe("restored");
     await expect(restoreFromQuarantine(id)).rejects.toThrow("Active");
   });
+  it("retained identity metadata does not allow the same evidence to be quarantined twice", async () => {
+    const scan = await fixture();
+    enable();
+    const id = await moveToQuarantine(scan);
+    await restoreFromQuarantine(id);
+    await expect(moveToQuarantine(scan)).rejects.toThrow("already exists");
+    expect((await lstat(scan.path)).isFile()).toBe(true);
+  });
   it("refuses changed media since evidence was captured", async () => {
     const scan = await fixture();
     enable();

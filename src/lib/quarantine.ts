@@ -170,8 +170,13 @@ export async function moveExclusive(
   }
 }
 
-export async function moveToQuarantine(scan: ScanResult, signal?: AbortSignal) {
+export async function moveToQuarantine(
+  scan: ScanResult,
+  signal?: AbortSignal,
+  requireJobOwnership: () => void = () => {},
+) {
   const authorize = () => {
+    requireJobOwnership();
     signal?.throwIfAborted();
     permitted();
   };
@@ -185,7 +190,8 @@ export async function moveToQuarantine(scan: ScanResult, signal?: AbortSignal) {
     throw new Error("Persisted evidence does not match");
   scan = JSON.parse(stored.data) as ScanResult;
   if (
-    decideAudio(scan.duration, scan.tracks, getSettings()).decision !== "fail"
+    decideAudio(scan.duration, scan.tracks, getSettings(), scan.arrFileEvidence)
+      .decision !== "fail"
   )
     throw new Error("Stored evidence is no longer conclusive");
   const original = await safeMediaPath(scan.path, roots());
@@ -207,9 +213,9 @@ export async function moveToQuarantine(scan: ScanResult, signal?: AbortSignal) {
     .transaction(() => {
       const prior = raw()
         .prepare(
-          "SELECT id FROM quarantines WHERE original_path=? AND evidence=?",
+          "SELECT id FROM quarantines WHERE original_path=? AND json_extract(evidence,'$.scan.fingerprint')=?",
         )
-        .get(original, evidence) as { id: string } | undefined;
+        .get(original, scan.fingerprint) as { id: string } | undefined;
       if (prior) return prior.id;
       raw()
         .prepare("INSERT INTO quarantines VALUES(?,?,?,?,?,?,?)")
@@ -244,11 +250,21 @@ export async function moveToQuarantine(scan: ScanResult, signal?: AbortSignal) {
       authorize,
       originalIdentity,
     );
+    const kept = await lstat(target);
+    const retainedIdentity = {
+      dev: kept.dev,
+      ino: kept.ino,
+      size: kept.size,
+      mtimeMs: kept.mtimeMs,
+    };
     raw()
       .prepare(
-        "UPDATE quarantines SET state='quarantined' WHERE id=? AND state='moving'",
+        "UPDATE quarantines SET state='quarantined',evidence=? WHERE id=? AND state='moving'",
       )
-      .run(id);
+      .run(
+        JSON.stringify({ scan, originalPath: original, retainedIdentity }),
+        id,
+      );
     audit("quarantine", `Quarantined ${id}`);
     return id;
   } catch (error) {
@@ -315,5 +331,77 @@ export async function restoreFromQuarantine(id: string) {
       error: "Restore incomplete. Existing files were not overwritten.",
     });
     throw error;
+  }
+}
+
+/** Cleanup is opt-in and only dispatched after replacement verification. Pin the
+ * quarantine parent and refuse changed copies or an in-flight restore. */
+export async function removeVerifiedQuarantine(
+  id: string,
+  verifyReplacement: () => Promise<void>,
+) {
+  permitted();
+  const item = quarantine(id);
+  if (!item || item.state !== "quarantined")
+    throw new Error("Active quarantine not found");
+  const retained = JSON.parse(item.evidence).retainedIdentity as
+    | { dev: number; ino: number; size: number; mtimeMs: number }
+    | undefined;
+  if (!retained)
+    throw new Error(
+      "Quarantine identity was not recorded; retain this copy for manual recovery",
+    );
+  const root = await quarantineRoot();
+  if (
+    path.dirname(item.quarantine_path) !== root ||
+    (await realpath(item.quarantine_path)) !== item.quarantine_path
+  )
+    throw new Error("Unsafe quarantine cleanup path");
+  const parent = await openDirectory(root);
+  try {
+    const pinned = `/proc/self/fd/${parent.fd}/${path.basename(item.quarantine_path)}`;
+    const current = await lstat(pinned);
+    if (!current.isFile() || !same(retained, current))
+      throw new Error("Quarantined copy changed; cleanup refused");
+    await verifyReplacement();
+    permitted();
+    if (
+      (await quarantineRoot()) !== root ||
+      !same(retained, await lstat(pinned))
+    )
+      throw new Error("Quarantine boundaries or copy changed");
+    const claimed = raw()
+      .prepare(
+        "UPDATE quarantines SET state='cleaning' WHERE id=? AND state='quarantined'",
+      )
+      .run(id).changes;
+    if (!claimed) throw new Error("Quarantine is already claimed");
+    try {
+      permitted();
+      await unlink(pinned);
+      await parent.sync();
+      raw()
+        .prepare(
+          "UPDATE quarantines SET state='cleaned' WHERE id=? AND state='cleaning'",
+        )
+        .run(id);
+      audit(
+        "quarantine",
+        `Removed failed copy ${id} after verified replacement and explicit confirmation`,
+        "admin",
+      );
+    } catch (error) {
+      raw()
+        .prepare("UPDATE quarantines SET state='needs-attention' WHERE id=?")
+        .run(id);
+      needsAttention(id, "quarantine cleanup incomplete", {
+        operationId: id,
+        reason:
+          "Inspect the recorded quarantine path; cleanup is never retried automatically.",
+      });
+      throw error;
+    }
+  } finally {
+    await parent.close();
   }
 }

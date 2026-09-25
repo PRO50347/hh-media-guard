@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { currentSession } from "@/lib/auth";
 import { ScanControls } from "@/components/ScanControls";
+import { withRemediation } from "@/lib/manual-remediation";
 import { listMediaItems } from "@/lib/store";
 import { MediaView } from "@/components/MediaView";
 export default async function Library() {
@@ -10,7 +11,7 @@ export default async function Library() {
       <h1>Library audit</h1>
       <ScanControls />
       <h2>All media</h2>
-      <MediaView items={listMediaItems()} />
+      <MediaView items={withRemediation(listMediaItems())} />
     </main>
   );
 }

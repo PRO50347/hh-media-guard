@@ -2,6 +2,8 @@
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { api, json } from "./api";
+import { RemediationAction, useRemediationRefresh } from "./RemediationAction";
+import type { RemediationControl } from "@/lib/remediation-ui";
 type Item = {
   id: string;
   source: string;
@@ -12,8 +14,10 @@ type Item = {
   last_scanned_at?: string;
   action_state: string;
   details?: string;
+  remediation?: RemediationControl;
 };
 export function MediaView({ items }: { items: Item[] }) {
+  useRemediationRefresh(items.map((item) => item.remediation));
   const [search, setSearch] = useState("");
   const params = useSearchParams();
   const router = useRouter();
@@ -107,9 +111,12 @@ export function MediaView({ items }: { items: Item[] }) {
                   </td>
                   <td>{item.last_scanned_at || "—"}</td>
                   <td>
-                    {item.action_state}
+                    {(!item.remediation ||
+                      item.remediation.state === "Ready") &&
+                      item.action_state}
                     <br />
                     <button onClick={() => void rescan([item])}>Rescan</button>
+                    <RemediationAction control={item.remediation} />
                   </td>
                 </tr>
               ))}

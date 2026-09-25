@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { RemediationAction, useRemediationRefresh } from "./RemediationAction";
 import { api, json } from "./api";
 import {
   attentionEvidence,
@@ -17,6 +18,7 @@ export function AttentionView({
   queue: ReturnType<typeof attentionQueue>;
 }) {
   const { items, summary, mediaCounts, total } = queue;
+  useRemediationRefresh(items.map((item) => item.remediation));
   const pagination = queue;
   const params = useSearchParams();
   const filters = attentionFilters(params);
@@ -145,6 +147,7 @@ export function AttentionView({
               <summary>View evidence</summary>
               <pre>{attentionEvidence(item.evidence)}</pre>
             </details>
+            <RemediationAction control={item.remediation} />
             <div className="actions">
               <button onClick={() => void act(item.id, "rescan")}>
                 Rescan

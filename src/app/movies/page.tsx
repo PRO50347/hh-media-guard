@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { currentSession } from "@/lib/auth";
+import { withRemediation } from "@/lib/manual-remediation";
 import { listMediaItems } from "@/lib/store";
 import { MediaView } from "@/components/MediaView";
 export default async function Movies() {
@@ -7,7 +8,7 @@ export default async function Movies() {
   return (
     <main>
       <h1>Movies</h1>
-      <MediaView items={listMediaItems("radarr")} />
+      <MediaView items={withRemediation(listMediaItems("radarr"))} />
     </main>
   );
 }

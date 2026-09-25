@@ -196,6 +196,58 @@ describe("dashboard and work queue navigation", () => {
     ).toContain("No items match these filters");
   });
 
+  it("offers the shared remediation control on eligible media and attention cards while retaining Rescan", () => {
+    navigation.query = "";
+    const remediation = {
+      mediaId: "radarr:42:/movie",
+      eligible: true,
+      state: "Ready" as const,
+    };
+    const mediaHtml = renderToStaticMarkup(
+      createElement(MediaView, {
+        items: [
+          {
+            id: remediation.mediaId,
+            source: "radarr",
+            arr_id: 42,
+            title: "Wrong language movie",
+            path: "/movie",
+            decision: "fail",
+            action_state: "none",
+            remediation,
+          },
+          {
+            id: "unknown",
+            source: "sonarr",
+            arr_id: 43,
+            title: "Unknown",
+            path: "/episode",
+            decision: "needs-analysis",
+            action_state: "none",
+            remediation: { ...remediation, eligible: false },
+          },
+        ],
+      }),
+    );
+    expect(mediaHtml.match(/Fix &amp; Redownload/g)).toHaveLength(1);
+    expect(mediaHtml.match(/>Rescan<\/button>/g)).toHaveLength(2);
+    const attentionHtml = renderToStaticMarkup(
+      createElement(AttentionView, {
+        queue: {
+          items: [{ ...items[0], remediation }],
+          summary: { open: 1, ignored: 0, accepted: 0 },
+          mediaCounts: { all: 1, movies: 1, tv: 0 },
+          total: 1,
+          page: 1,
+          pages: 1,
+        },
+      }),
+    );
+    expect(attentionHtml).toContain("Fix &amp; Redownload");
+    expect(attentionHtml).toContain(">Rescan</button>");
+    expect(attentionHtml).toContain(">Ignore</button>");
+  });
+
   it("opens the existing media table with the dashboard Verified filter", () => {
     navigation.query = "status=pass";
     const rows = ["pass", "fail"].map((decision) => ({

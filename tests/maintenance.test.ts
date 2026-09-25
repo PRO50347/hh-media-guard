@@ -80,6 +80,30 @@ describe("startup recovery and scheduling", () => {
       { count: 2 },
     );
   });
+  it("interrupted cleanup is retained as needs-attention and is never replayed", () => {
+    raw()
+      .prepare("INSERT INTO quarantines VALUES(?,?,?,?,?,?,?)")
+      .run(
+        "cleanup",
+        "/fixture/a",
+        "/fixture/b",
+        "{}",
+        "cleaning",
+        "fixture",
+        null,
+      );
+    recoverOperations();
+    recoverOperations();
+    expect(
+      raw().prepare("SELECT state FROM quarantines WHERE id='cleanup'").get(),
+    ).toEqual({ state: "needs-attention" });
+    expect(
+      raw()
+        .prepare("SELECT COUNT(*) count FROM attention WHERE subject='cleanup'")
+        .get(),
+    ).toEqual({ count: 1 });
+    expect(jobQueue.list()).toHaveLength(0);
+  });
   it("only one runtime may recover operations; expired owners cannot renew or release a successor", () => {
     let time = 0;
     const first = new RuntimeLease(raw(), () => time, 100);

@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { currentSession } from "@/lib/auth";
 import { raw } from "@/lib/store";
 import { attentionQueue } from "@/lib/attention-query";
+import { attentionRemediation } from "@/lib/manual-remediation";
 import { AttentionView } from "@/components/AttentionView";
 export default async function Attention({
   searchParams,
@@ -15,6 +16,13 @@ export default async function Attention({
     else if (Array.isArray(value) && value[0]) params.set(key, value[0]);
   }
   const queue = attentionQueue(raw(), params);
+  queue.items = queue.items.map((item) => ({
+    ...item,
+    remediation:
+      item.reason === "missing required language" && item.state === "open"
+        ? attentionRemediation(item.subject)
+        : undefined,
+  }));
   return (
     <main>
       <h1>Needs Attention</h1>

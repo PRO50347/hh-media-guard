@@ -8,12 +8,15 @@ import {
   audit,
   integration,
   integrationKey,
+  roots,
 } from "./store";
 import { decryptSecret } from "./crypto";
 import { moveToQuarantine } from "./quarantine";
+import { decideAudio } from "./rules";
 import { translateArrPath } from "./library";
 import { reserveReplacement } from "./retries";
 import type { ScanResult } from "./types";
+import { safeMediaPath } from "./security";
 import { fingerprint } from "./scanner";
 import { requireRuntimeOwnership } from "./runtime-lease";
 
@@ -26,7 +29,7 @@ export interface MediaIdentity {
   downloadId?: string;
 }
 type Client = SonarrClient | RadarrClient;
-function allowed() {
+export function requireRemediationAllowed() {
   requireRuntimeOwnership();
   if (
     process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true" ||
@@ -98,8 +101,14 @@ export async function remediate(
   identity: MediaIdentity,
   provided?: Client,
   signal = new AbortController().signal,
+  requireJobOwnership: () => void = () => {},
 ) {
-  allowed();
+  const authorize = () => {
+    requireJobOwnership();
+    signal.throwIfAborted();
+    requireRemediationAllowed();
+  };
+  authorize();
   if (scan.decision !== "fail" || !scan.fingerprint)
     throw new Error("Conclusive failed evidence required");
   const key = createHash("sha256")
@@ -151,6 +160,20 @@ export async function remediate(
         : current.movieId !== identity.entityId)
     )
       throw new Error("Arr file identity does not match mapped evidence");
+    const currentLanguages = {
+      source: identity.source,
+      entityId: identity.entityId,
+      fileId: current.id,
+      arrPath: current.path,
+      languages: (current.languages || []).map((language) => language.name),
+    };
+    if (
+      decideAudio(scan.duration, scan.tracks, getSettings(), currentLanguages)
+        .decision !== "fail"
+    )
+      throw new Error(
+        "Current exact-file language evidence is not a conclusive failure",
+      );
     const episodeIds =
       client instanceof SonarrClient
         ? (await client.episodes(identity.seriesId!))
@@ -179,8 +202,7 @@ export async function remediate(
         ]),
       )
       .digest("hex");
-    allowed();
-    signal.throwIfAborted();
+    authorize();
     const downloadKey = createHash("sha256")
       .update(`${identity.source}:download:${release.downloadId}`)
       .digest("hex");
@@ -194,13 +216,12 @@ export async function remediate(
       .prepare("UPDATE operations SET release_key=? WHERE id=?")
       .run(releaseKey, id);
     state(id, "quarantining");
-    const quarantineId = await moveToQuarantine(scan, signal);
+    const quarantineId = await moveToQuarantine(scan, signal, authorize);
     raw()
       .prepare("UPDATE operations SET quarantine_id=? WHERE id=?")
       .run(quarantineId, id);
     step(id, "quarantine", { quarantineId });
-    allowed();
-    signal.throwIfAborted();
+    authorize();
     state(id, "rescanning");
     // Ask Arr to reconcile missing media, rather than DELETE a pathname that an
     // independent importer might concurrently replace.
@@ -240,17 +261,14 @@ export async function remediate(
       )
     )
       throw new Error("Arr still reports media at the original path");
-    allowed();
-    signal.throwIfAborted();
+    authorize();
     if ((await client.downloadHandling()).autoRedownloadFailed)
       throw new Error("Arr redownload settings changed");
-    allowed();
-    signal.throwIfAborted();
+    authorize();
     state(id, "blocklisting");
     await client.markHistoryFailed(release.id);
     step(id, "history-failed", { historyId: release.id });
-    allowed();
-    signal.throwIfAborted();
+    authorize();
     state(id, "searching");
     const search = z
       .object({ id: z.number().int().positive() })
@@ -304,6 +322,47 @@ export async function verifyReplacement(
       .get(identity.source, identity.entityId)
   )
     return;
+  await validateReplacementEvidence(scan, identity, provided);
+  requireRuntimeOwnership();
+  const pending = raw()
+    .prepare(
+      "SELECT id FROM operations WHERE source=? AND entity_id=? AND file_id<>? AND state='pending'",
+    )
+    .all(identity.source, identity.entityId, identity.fileId) as {
+    id: string;
+  }[];
+  raw()
+    .transaction(() => {
+      for (const operation of pending) {
+        step(operation.id, "verified-replacement", { scan, identity });
+        state(operation.id, "complete");
+      }
+      if (pending.length) {
+        raw()
+          .prepare(
+            "UPDATE media_items SET action_state='none' WHERE source=? AND arr_id=?",
+          )
+          .run(identity.source, identity.entityId);
+        audit(
+          "replacement",
+          `Verified replacement for ${identity.source}:${identity.entityId}`,
+        );
+      }
+    })
+    .immediate();
+}
+
+/** Recheck a persisted PASS and the current Arr file before allowing cleanup. */
+export async function validateReplacementEvidence(
+  scan: ScanResult,
+  identity: MediaIdentity,
+  provided?: Client,
+) {
+  requireRuntimeOwnership();
+  if (scan.decision !== "pass" || !scan.fingerprint)
+    throw new Error("Verified replacement evidence required");
+  if ((await safeMediaPath(scan.path, roots())) !== scan.path)
+    throw new Error("Replacement path is no longer safe");
   const stored = raw()
     .prepare("SELECT data FROM scans WHERE fingerprint=? AND decision='pass'")
     .get(scan.fingerprint) as { data: string } | undefined;
@@ -313,6 +372,18 @@ export async function verifyReplacement(
     (await fingerprint(scan.path, getSettings())) !== scan.fingerprint
   )
     throw new Error("Replacement evidence is missing or changed");
+  const persisted = JSON.parse(stored.data) as ScanResult;
+  if (
+    persisted.decision !== "pass" ||
+    persisted.fingerprint !== scan.fingerprint ||
+    decideAudio(
+      persisted.duration,
+      persisted.tracks,
+      getSettings(),
+      persisted.arrFileEvidence,
+    ).decision !== "pass"
+  )
+    throw new Error("Replacement evidence is no longer a conclusive pass");
   const client = provided || clientFor(identity.source);
   const file =
     client instanceof SonarrClient
@@ -336,25 +407,25 @@ export async function verifyReplacement(
     )
   )
     throw new Error("Replacement episode identity is inconsistent");
-  const result = raw()
-    .prepare(
-      "UPDATE operations SET state='complete',updated_at=? WHERE source=? AND entity_id=? AND file_id<>? AND state='pending'",
-    )
-    .run(
-      new Date().toISOString(),
-      identity.source,
-      identity.entityId,
-      identity.fileId,
+  const currentLanguages = {
+    source: identity.source,
+    entityId: identity.entityId,
+    fileId: file.id,
+    arrPath: file.path,
+    languages: (file.languages || []).map((language) => language.name),
+  };
+  if (
+    decideAudio(
+      persisted.duration,
+      persisted.tracks,
+      getSettings(),
+      currentLanguages,
+    ).decision !== "pass"
+  )
+    throw new Error(
+      "Current replacement language evidence is not a conclusive pass",
     );
-  if (result.changes) {
-    raw()
-      .prepare(
-        "UPDATE media_items SET action_state='none' WHERE source=? AND arr_id=?",
-      )
-      .run(identity.source, identity.entityId);
-    audit(
-      "replacement",
-      `Verified replacement for ${identity.source}:${identity.entityId}`,
-    );
-  }
+  requireRuntimeOwnership();
+  if ((await fingerprint(scan.path, getSettings())) !== scan.fingerprint)
+    throw new Error("Replacement changed during verification");
 }

@@ -44,7 +44,9 @@ export function recoverOperations() {
     });
   }
   const movements = raw()
-    .prepare("SELECT id FROM quarantines WHERE state IN ('moving','restoring')")
+    .prepare(
+      "SELECT id FROM quarantines WHERE state IN ('moving','restoring','cleaning')",
+    )
     .all() as { id: string }[];
   for (const item of movements) {
     raw()

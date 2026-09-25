@@ -1,3 +1,4 @@
+import type { RemediationControl } from "./remediation-ui";
 export type AttentionItem = {
   id: string;
   subject: string;
@@ -7,6 +8,7 @@ export type AttentionItem = {
   media_title?: string | null;
   media_source?: string | null;
   related_evidence?: string | null;
+  remediation?: RemediationControl;
 };
 
 export const reasonOptions = [
