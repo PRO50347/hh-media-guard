@@ -413,3 +413,22 @@ fieldset.save-controls {
   margin: 0;
   min-width: 0;
 }
+
+.metric-link {
+  text-decoration: none;
+}
+.metric-link:hover,
+.metric-link:focus-visible,
+.queue-filter[aria-current="true"] {
+  border-color: var(--accent);
+  background: var(--elevated);
+}
+.metric-hint {
+  display: block;
+  margin-top: 12px;
+  color: var(--accent);
+  font-size: 12px;
+}
+.attention-item {
+  overflow-wrap: anywhere;
+}

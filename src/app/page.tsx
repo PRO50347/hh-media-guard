@@ -10,19 +10,29 @@ export default async function Dashboard() {
   const count = (sql: string) =>
     (raw().prepare(sql).get() as { count: number }).count;
   const metrics = [
-    ["Total scanned", totals.total],
-    ["Verified", totals.pass],
-    ["Wrong language", totals.fail],
-    ["Needs analysis", totals.analysis],
+    ["Total scanned", totals.total, "/library"],
+    ["Verified", totals.pass, "/library?status=pass"],
+    [
+      "Wrong language",
+      totals.fail,
+      "/attention?reason=wrong-language&status=open",
+    ],
+    [
+      "Needs analysis",
+      totals.analysis,
+      "/attention?reason=needs-analysis&status=open",
+    ],
     [
       "Needs attention",
       count("SELECT COUNT(*) count FROM attention WHERE state='open'"),
+      "/attention?status=open",
     ],
     [
       "Quarantined",
       count("SELECT COUNT(*) count FROM quarantines WHERE state='quarantined'"),
+      "/quarantine",
     ],
-  ];
+  ] as const;
   return (
     <main>
       <p className="eyebrow">
@@ -36,11 +46,12 @@ export default async function Dashboard() {
         </p>
       )}
       <div className="metrics">
-        {metrics.map(([label, value]) => (
-          <article className="metric" key={label}>
+        {metrics.map(([label, value, href]) => (
+          <Link className="metric metric-link" key={label} href={href}>
             <span>{label}</span>
             <b>{value}</b>
-          </article>
+            <span className="metric-hint">View items →</span>
+          </Link>
         ))}
       </div>
       <div className="actions">

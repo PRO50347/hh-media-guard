@@ -1,21 +1,25 @@
 "use client";
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { api, json } from "./api";
+import {
+  attentionEvidence,
+  attentionDetails,
+  attentionFilters,
+  attentionHref,
+  reasonOptions,
+} from "@/lib/attention-view";
+import type { attentionQueue } from "@/lib/attention-query";
 export function AttentionView({
-  items,
+  queue,
 }: {
-  items: {
-    id: string;
-    subject: string;
-    reason: string;
-    evidence: string;
-    state: string;
-  }[];
+  queue: ReturnType<typeof attentionQueue>;
 }) {
-  const [filter, setFilter] = useState("open");
-  const shown = items.filter((item) => !filter || item.state === filter);
+  const { items, summary, mediaCounts, total } = queue;
+  const pagination = queue;
+  const params = useSearchParams();
+  const filters = attentionFilters(params);
   const [message, setMessage] = useState("");
   const router = useRouter();
   async function act(id: string, action: string) {
@@ -47,25 +51,99 @@ export function AttentionView({
         remaining limits.
       </p>
       <p role="status">{message}</p>
-      <label>
-        Attention status
-        <select value={filter} onChange={(e) => setFilter(e.target.value)}>
-          <option value="open">Open</option>
-          <option value="">All</option>
-          <option value="accepted">Accepted</option>
-          <option value="ignored">Ignored</option>
-        </select>
-      </label>
-      {shown.length ? (
-        shown.map((item) => (
-          <section className="card" key={item.id}>
-            <h2>
-              {item.reason} <span className="badge">{item.state}</span>
-            </h2>
-            <p>{item.subject}</p>
+      <section className="card" aria-label="Queue filters">
+        <h2>Work queue</h2>
+        <p>
+          {summary.open} open · {summary.ignored} ignored · {summary.accepted}{" "}
+          accepted
+        </p>
+        <div className="actions" role="group" aria-label="Media type">
+          {(
+            [
+              ["all", "All"],
+              ["movies", "Movies"],
+              ["tv", "TV Shows"],
+            ] as const
+          ).map(([value, label]) => (
+            <Link
+              key={value}
+              className="button queue-filter"
+              aria-current={filters.media === value ? "true" : undefined}
+              href={attentionHref(params, "media", value)}
+              scroll={false}
+            >
+              {label} ({mediaCounts[value]})
+            </Link>
+          ))}
+        </div>
+        <div className="form-grid">
+          <label>
+            Reason
+            <select
+              value={filters.reason}
+              onChange={(event) =>
+                router.replace(
+                  attentionHref(params, "reason", event.target.value),
+                  { scroll: false },
+                )
+              }
+            >
+              {reasonOptions.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Attention status
+            <select
+              value={filters.status}
+              onChange={(event) =>
+                router.replace(
+                  attentionHref(params, "status", event.target.value),
+                  { scroll: false },
+                )
+              }
+            >
+              <option value="open">Open</option>
+              <option value="all">All statuses</option>
+              <option value="accepted">Accepted</option>
+              <option value="ignored">Ignored</option>
+            </select>
+          </label>
+        </div>
+        <Link href="/attention" scroll={false}>
+          Reset filters
+        </Link>
+      </section>
+      <p role="status">
+        {total} matching items · Page {pagination.page} of {pagination.pages}
+      </p>
+      {items.length ? (
+        items.map((item) => (
+          <section className="card attention-item" key={item.id}>
+            <h2>{attentionDetails(item).title}</h2>
+            <div className="actions">
+              <span className="badge">
+                {attentionDetails(item).media === "movies"
+                  ? "Movie"
+                  : attentionDetails(item).media === "tv"
+                    ? "TV Show"
+                    : "Media type unavailable"}
+              </span>
+              <span className="badge">{attentionDetails(item).source}</span>
+              <span className="badge">{item.state}</span>
+            </div>
+            <p>
+              <strong>Reason:</strong> {item.reason}
+            </p>
+            {attentionDetails(item).title !== item.subject && (
+              <p className="muted">{item.subject}</p>
+            )}
             <details>
               <summary>View evidence</summary>
-              <pre>{JSON.stringify(JSON.parse(item.evidence), null, 2)}</pre>
+              <pre>{attentionEvidence(item.evidence)}</pre>
             </details>
             <div className="actions">
               <button onClick={() => void act(item.id, "rescan")}>
@@ -87,7 +165,30 @@ export function AttentionView({
           </section>
         ))
       ) : (
-        <p className="card empty">Nothing needs attention.</p>
+        <p className="card empty">
+          No items match these filters. Try another reason, media type, or
+          status.
+        </p>
+      )}
+      {pagination.pages > 1 && (
+        <div className="actions" role="group" aria-label="Queue pages">
+          {pagination.page > 1 && (
+            <Link
+              className="button"
+              href={attentionHref(params, "page", String(pagination.page - 1))}
+            >
+              Previous page
+            </Link>
+          )}
+          {pagination.page < pagination.pages && (
+            <Link
+              className="button"
+              href={attentionHref(params, "page", String(pagination.page + 1))}
+            >
+              Next page
+            </Link>
+          )}
+        </div>
       )}
     </>
   );

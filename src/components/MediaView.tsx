@@ -1,4 +1,5 @@
 "use client";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { api, json } from "./api";
 type Item = {
@@ -14,7 +15,16 @@ type Item = {
 };
 export function MediaView({ items }: { items: Item[] }) {
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("");
+  const params = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  const filter = params.get("status") || "";
+  function setFilter(value: string) {
+    const next = new URLSearchParams(params.toString());
+    if (value) next.set("status", value);
+    else next.delete("status");
+    router.replace(`${pathname}?${next}`, { scroll: false });
+  }
   const [message, setMessage] = useState("");
   const shown = items.filter(
     (item) =>
