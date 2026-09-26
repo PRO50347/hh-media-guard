@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.7
+
+- Add Manual Fix & Redownload mode for explicitly selected, one-at-a-time remediation; normal scans, rescans, schedules, and webhooks remain non-destructive in this mode.
+- Enforce one active manual remediation at a time, including queued/running work and pending replacements; uncertain operations require inspection.
+- Correct Sonarr/Radarr library-file history correlation to use importedPath instead of the original download droppedPath.
+- Use bounded, scoped Arr history lookups while preserving strict download, episode/movie, and shared-release checks.
+- Accept realistic nullable and non-string unrelated Arr history metadata without weakening required correlation evidence.
+- Require a new, unambiguous matching blocklist entry before replacement search; HTTP success alone never authorizes search.
+- Journal mutation intents before dispatch and outcomes separately, preserving refusal to replay uncertain actions.
+- Allow explicit guarded retry only for proven pre-mutation failures with revalidated persisted evidence, fingerprint, and exact Arr identity.
+- Preserve quarantine-first handling, verified replacement before completion, explicit failed-copy cleanup, and all destructive-action, runtime, path, retry, and cooldown protections. Monitor Only remains the default.
+- Improve TV, Movies, and Library performance with server-side search/filtering, 25-item pagination, and batched remediation state lookup for only the current page.
+
 ## 0.2.6
 
 - Add a manual Fix & Redownload action for conclusive wrong-language failures from Movies, TV Shows, and relevant Needs Attention items, with explicit confirmation.
