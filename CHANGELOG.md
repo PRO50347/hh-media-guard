@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.8
+
+- Support Sonarr episodeFileRenamed and Radarr movieFileRenamed history when correlating imported releases.
+- Identify the original imported release after Arr renames or organizes its library file using exact, normalized-safe rename transitions, bounded to 16 hops.
+- Fail closed on rename cycles, forks, missing links, multiple reachable imports, and ambiguous history; never fall back to fuzzy or filename-only matching.
+- Preserve exact media identity, shared-download refusal, blocklist corroboration before replacement search, and all existing remediation safety gates.
+- Prevent the exact legacy pre-mutation redownload-setting failure from incorrectly blocking Manual mode only when database evidence proves no mutation, quarantine, or retry reservation occurred; preserve the original operation and guarded explicit retry.
+
 ## 0.2.7
 
 - Add Manual Fix & Redownload mode for explicitly selected, one-at-a-time remediation; normal scans, rescans, schedules, and webhooks remain non-destructive in this mode.
