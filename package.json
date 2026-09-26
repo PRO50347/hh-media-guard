@@ -1,6 +1,6 @@
 {
   "name": "hh-media-guard",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": false,
   "license": "MIT",
   "description": "Safe, monitor-only audio language validation for Sonarr and Radarr media.",

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.6
+
+- Add a manual Fix & Redownload action for conclusive wrong-language failures from Movies, TV Shows, and relevant Needs Attention items, with explicit confirmation.
+- Reuse the existing guarded remediation pipeline and durable jobs, revalidating persisted failed evidence and exact Sonarr/Radarr file identity.
+- Remove failed media from the active library through quarantine first, reconcile the missing file with Arr, mark the exact correlated release failed/blocklisted, and trigger a replacement search.
+- Show Fixing, Replacement pending, Needs attention, and Complete states while preserving existing Rescan and attention actions.
+- Never allow needs-analysis or unknown results to trigger destructive remediation.
+- Retain the failed copy in quarantine until a verified replacement passes; offer optional Remove failed copy cleanup with separate confirmation and fresh replacement and quarantine identity checks.
+- Preserve retry, cooldown, release-history correlation, idempotency, exact-file identity, path safety, runtime ownership, safety-mode, and destructive-action gates. Monitor Only remains the default; destructive actions are never enabled automatically.
+
 ## 0.2.5
 
 - Make dashboard summary cards clickable shortcuts, with keyboard navigation and hover/focus affordances.
