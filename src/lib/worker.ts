@@ -40,17 +40,32 @@ async function applyPolicy(
   scan: ScanResult,
   identity: MediaIdentity | undefined,
   signal: AbortSignal,
+  requireJobOwnership: () => void,
 ) {
+  requireJobOwnership();
   if (identity) await verifyReplacement(scan, identity);
-  if (scan.decision !== "fail" || getSettings().safetyMode === "monitor")
+  if (
+    scan.decision !== "fail" ||
+    !["quarantine", "automatic"].includes(getSettings().safetyMode)
+  )
     return;
   if (process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true") {
     needsAttention(scan.path, "destructive actions disabled", { scan });
     return false;
   }
+  const mode = getSettings().safetyMode;
+  const authorizePolicy = () => {
+    requireJobOwnership();
+    if (
+      !["quarantine", "automatic"].includes(mode) ||
+      getSettings().safetyMode !== mode
+    )
+      throw new Error("Scan policy no longer authorizes mutation");
+  };
   try {
+    authorizePolicy();
     if (getSettings().safetyMode === "quarantine") {
-      const id = await moveToQuarantine(scan, signal);
+      const id = await moveToQuarantine(scan, signal, authorizePolicy);
       raw()
         .prepare(
           "UPDATE media_items SET action_state='quarantined' WHERE path=?",
@@ -63,7 +78,8 @@ async function applyPolicy(
       return false;
     }
     return (
-      (await remediate(scan, identity, undefined, signal)) !== "needs-attention"
+      (await remediate(scan, identity, undefined, signal, authorizePolicy)) !==
+      "needs-attention"
     );
   } catch {
     needsAttention(scan.path, "quarantine failure", {
@@ -150,6 +166,7 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
         signal,
         () => owns(job, signal),
         payload.retry,
+        job,
       );
       owns(job, signal);
       jobQueue.finish(
@@ -231,7 +248,10 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
           }
         : undefined;
     jobQueue.counts(job, 1, 1);
-    if ((await applyPolicy(scan, identity, signal)) === false)
+    if (
+      (await applyPolicy(scan, identity, signal, () => owns(job, signal))) ===
+      false
+    )
       jobQueue.finish(
         job,
         "needs-attention",
@@ -360,7 +380,11 @@ async function auditLibrary(
             });
           if (scan.decision === "needs-analysis")
             needsAttention(mediaId, "unknown language", { item, scan });
-          if ((await applyPolicy(scan, item, signal)) === false) failures++;
+          if (
+            (await applyPolicy(scan, item, signal, () => owns(job, signal))) ===
+            false
+          )
+            failures++;
         }
       } catch (error) {
         signal.throwIfAborted();

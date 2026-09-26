@@ -116,7 +116,9 @@ describe("Arr API contracts", () => {
       totalRecords: 1,
     }));
     expect(
-      await new SonarrClient("http://sonarr.test", "mock", transport).history(),
+      await new SonarrClient("http://sonarr.test", "mock", transport).history({
+        downloadId: "test-download",
+      }),
     ).toHaveLength(1);
   });
   it.each([401, 404, 500])(
@@ -368,7 +370,8 @@ describe("real Arr history metadata", () => {
         episodeId: 12,
         movieId: 34,
         data: {
-          droppedPath: "/arr/exact.mkv",
+          droppedPath: "/downloads/complete/exact.mkv",
+          importedPath: "/arr/exact.mkv",
           imdbId: null,
           releaseGroup: null,
           unrelated: null,
@@ -380,16 +383,11 @@ describe("real Arr history metadata", () => {
         records: [record],
         totalRecords: 1,
       }));
-      expect(await client.history()).toEqual([record]);
+      expect(await client.history({ downloadId: "test-download" })).toEqual([
+        record,
+      ]);
     });
-    it.each([
-      { data: { droppedPath: null } },
-      { data: { droppedPath: 4 } },
-      { sourceTitle: "   " },
-      { downloadId: 123 },
-      { downloadId: " " },
-      { episodeId: "12" },
-    ])(
+    it.each([{ sourceTitle: 123 }, { downloadId: 123 }, { episodeId: "12" }])(
       `${name}: refuses invalid relied-on fields without exposing response content (%j)`,
       async (invalid) => {
         const client = new Client(
@@ -407,9 +405,9 @@ describe("real Arr history metadata", () => {
             totalRecords: 1,
           }),
         );
-        await expect(client.history()).rejects.toThrow(
-          `${name} history response could not be parsed`,
-        );
+        await expect(
+          client.history({ downloadId: "test-download" }),
+        ).rejects.toThrow(`${name} history response could not be parsed`);
       },
     );
   }

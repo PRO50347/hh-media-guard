@@ -138,6 +138,26 @@ function enable() {
 function mock(
   identity: MediaIdentity,
   options: {
+    historyCase?:
+      | "missing-path"
+      | "missing-download"
+      | "blank-download"
+      | "repeated-import"
+      | "conflicting-import"
+      | "repeated-grab"
+      | "conflicting-grab"
+      | "shared-download"
+      | "unsafe-path"
+      | "no-grab-metadata";
+    blocklistCase?:
+      | "absent"
+      | "ambiguous"
+      | "wrong-title"
+      | "wrong-identity"
+      | "wrong-protocol"
+      | "wrong-indexer"
+      | "old-only"
+      | "unavailable";
     redownload?: boolean;
     badHistory?: boolean;
     wrongHistory?: "path" | "download" | "identity";
@@ -149,9 +169,42 @@ function mock(
     languages?: { id: number; name: string }[];
   } = {},
 ) {
+  let marked = false;
+  const quality = {
+    quality: { id: 1, name: "SDTV", source: "television", resolution: 480 },
+    revision: { version: 1, real: 0, isRepack: false },
+  };
   const calls: { method: string; path: string; body: unknown }[] = [];
   const transport: ArrTransport = async (url, _key, method, body) => {
     calls.push({ method, path: url.pathname, body });
+    if (method === "POST") {
+      const op = operation(identity.fileId);
+      const intent = url.pathname.includes("/history/failed/")
+        ? "history-failed-intent"
+        : (body as { name: string }).name.endsWith("Search")
+          ? "replacement-search-intent"
+          : "rescan-command-intent";
+      expect(
+        raw()
+          .prepare(
+            "SELECT 1 FROM operation_steps WHERE operation_id=? AND step=?",
+          )
+          .get(op.id, intent),
+      ).toBeTruthy();
+      expect(
+        raw()
+          .prepare("SELECT 1 FROM retry_titles WHERE identity=?")
+          .get(`${identity.source}:${identity.entityId}`),
+      ).toBeTruthy();
+      if (intent === "replacement-search-intent")
+        expect(
+          raw()
+            .prepare(
+              "SELECT 1 FROM operation_steps WHERE operation_id=? AND step='blocklist-verified'",
+            )
+            .get(op.id),
+        ).toBeTruthy();
+    }
     const endpoint = url.pathname.replace("/api/v3", "");
     if (
       endpoint ===
@@ -178,17 +231,24 @@ function mock(
     if (endpoint === "/config/downloadclient")
       return { autoRedownloadFailed: Boolean(options.redownload) };
     if (endpoint === "/history") {
+      expect(
+        url.searchParams.has("episodeId") ||
+          url.searchParams.has("movieIds") ||
+          url.searchParams.has("downloadId"),
+      ).toBe(true);
       const reference =
         identity.source === "sonarr"
-          ? { episodeId: identity.entityId }
+          ? { episodeId: identity.entityId, seriesId: identity.seriesId }
           : { movieId: identity.entityId };
       const records = [
         {
           id: 1,
           eventType: "downloadFolderImported",
+          sourceTitle: `Fixture.Release.${identity.entityId}`,
           downloadId: identity.downloadId,
           data: {
-            droppedPath:
+            droppedPath: `/downloads/complete/Fixture.Release.${identity.entityId}/original.mka`,
+            importedPath:
               options.wrongHistory === "path"
                 ? "/wrong/path"
                 : identity.arrPath,
@@ -205,9 +265,18 @@ function mock(
           eventType: "grabbed",
           downloadId: identity.downloadId,
           sourceTitle: options.badHistory
-            ? null
+            ? 123
             : `Fixture.Release.${identity.entityId}`,
-          data: { indexerId: "1", imdbId: null, releaseGroup: null },
+          quality,
+          data: {
+            indexer: "Fixture Indexer",
+            publishedDate: "2026-01-01T00:00:00Z",
+            size: "123456",
+            protocol: "1",
+            guid: "fixture-release-guid",
+            imdbId: null,
+            releaseGroup: null,
+          },
           ...reference,
         },
       ];
@@ -220,10 +289,79 @@ function mock(
             ? { episodeId: 999999 }
             : { movieId: 999999 },
         );
-      return {
-        records: options.ambiguous ? [] : records,
-        totalRecords: options.ambiguous ? 0 : records.length,
+      const shaped = records as unknown as Record<string, unknown>[];
+      const imported = shaped[0];
+      const grabbed = shaped[1];
+      const data = imported.data as Record<string, unknown>;
+      if (options.historyCase === "missing-path") delete data.importedPath;
+      if (options.historyCase === "unsafe-path")
+        data.importedPath = "/tv/../" + identity.arrPath;
+      if (options.historyCase === "missing-download")
+        delete imported.downloadId;
+      if (options.historyCase === "blank-download") imported.downloadId = "";
+      if (options.historyCase === "no-grab-metadata")
+        grabbed.data = { releaseGroup: null };
+      if (options.historyCase === "repeated-import")
+        shaped.push({ ...imported, id: 3 });
+      if (options.historyCase === "conflicting-import")
+        shaped.push({ ...imported, id: 3, downloadId: "different" });
+      if (options.historyCase === "repeated-grab")
+        shaped.push({ ...grabbed, id: 4 });
+      if (options.historyCase === "conflicting-grab")
+        shaped.push({
+          ...grabbed,
+          id: 4,
+          data: { ...(grabbed.data as object), size: "98765" },
+        });
+      if (options.historyCase === "shared-download")
+        shaped.push({ ...grabbed, id: 4, episodeId: 999999, movieId: 999999 });
+      // Identity-scoped lookup hides other titles; download-scoped lookup must expose them.
+      const selected = options.ambiguous
+        ? []
+        : url.searchParams.has("downloadId")
+          ? shaped.filter(
+              (row) => row.downloadId === url.searchParams.get("downloadId"),
+            )
+          : shaped.filter((row) => row.eventType === "downloadFolderImported");
+      return { records: selected, totalRecords: selected.length };
+    }
+    if (endpoint === "/blocklist") {
+      expect(
+        url.searchParams.get(
+          identity.source === "sonarr" ? "seriesIds" : "movieIds",
+        ),
+      ).toBe(String(identity.seriesId || identity.entityId));
+      if (marked && options.blocklistCase === "unavailable")
+        throw new Error("Read interrupted");
+      const entry = {
+        id: 400,
+        sourceTitle: `Fixture.Release.${identity.entityId}`,
+        seriesId: identity.seriesId,
+        episodeIds: [identity.entityId],
+        movieId: identity.entityId,
+        protocol: "usenet",
+        indexer: "Fixture Indexer",
+        quality,
       };
+      if (options.blocklistCase === "wrong-title")
+        entry.sourceTitle = "Other.Release";
+      if (options.blocklistCase === "wrong-identity") {
+        entry.movieId = 99;
+        entry.episodeIds = [99];
+      }
+      if (options.blocklistCase === "wrong-protocol")
+        entry.protocol = "torrent";
+      if (options.blocklistCase === "wrong-indexer")
+        entry.indexer = "Other Indexer";
+      const records =
+        options.blocklistCase === "old-only"
+          ? [entry]
+          : !marked || options.blocklistCase === "absent"
+            ? []
+            : options.blocklistCase === "ambiguous"
+              ? [entry, { ...entry, id: 401 }]
+              : [entry];
+      return { records, totalRecords: records.length };
     }
     if (endpoint === "/command") {
       if (
@@ -237,6 +375,7 @@ function mock(
       return { id: options.wrongCommand ? 78 : 77, status: "completed" };
     if (endpoint === "/moviefile" || endpoint === "/episodefile") return [];
     if (endpoint === "/history/failed/2") {
+      marked = true;
       if (options.failReject) throw new Error("Uncertain rejection response");
       return {};
     }
@@ -446,8 +585,11 @@ async function runQueued(id: string) {
 describe("manual Fix & Redownload through the durable job API", () => {
   for (const source of ["sonarr", "radarr"] as const) {
     it(`${source}: queues once, preserves quarantine, rejects then searches, verifies PASS and permits explicit cleanup`, async () => {
+      clearOperationFixtures();
       const { scan, identity, mediaId } = await fixture(source);
+      const other = await fixture(source);
       enable();
+      saveSettings({ safetyMode: "manual" });
       const { calls } = wire(identity);
       expect(manualRemediationControl(mediaId)).toMatchObject({
         eligible: true,
@@ -459,6 +601,8 @@ describe("manual Fix & Redownload through the durable job API", () => {
       expect(response.status).toBe(202);
       const queued = await response.json();
       expect(queued.state).toBe("Fixing");
+      expect((await requestRemediation(other.mediaId)).status).toBe(400);
+      expect((await lstat(other.scan.path)).isFile()).toBe(true);
       expect(await (await requestRemediation(mediaId)).json()).toEqual(queued);
       expect(manualRemediationControl(mediaId).state).toBe("Fixing");
       expect(calls).toHaveLength(0);
@@ -466,7 +610,30 @@ describe("manual Fix & Redownload through the durable job API", () => {
       expect(manualRemediationControl(mediaId).state).toBe(
         "Replacement pending",
       );
+      expect((await requestRemediation(other.mediaId)).status).toBe(400);
+      expect(
+        raw()
+          .prepare("SELECT 1 FROM operations WHERE file_id=?")
+          .get(other.identity.fileId),
+      ).toBeUndefined();
       const op = operation(identity.fileId);
+      const markers = raw()
+        .prepare(
+          "SELECT step FROM operation_steps WHERE operation_id=? ORDER BY id",
+        )
+        .all(op.id) as { step: string }[];
+      expect(markers.map((row) => row.step)).toEqual([
+        "mutation-started",
+        "quarantine-intent",
+        "quarantine",
+        "rescan-command-intent",
+        "rescan-command",
+        "history-failed-intent",
+        "history-failed",
+        "blocklist-verified",
+        "replacement-search-intent",
+        "replacement-search",
+      ]);
       const retained = quarantine(op.quarantine_id)!;
       const bytes = await readFile(retained.quarantine_path);
       await expect(lstat(scan.path)).rejects.toMatchObject({ code: "ENOENT" });
@@ -542,6 +709,13 @@ describe("manual Fix & Redownload through the durable job API", () => {
         }),
       );
       expect(cleanup.status).toBe(200);
+      expect(
+        raw()
+          .prepare(
+            "SELECT step FROM operation_steps WHERE operation_id=? AND step LIKE 'cleanup-%' ORDER BY id",
+          )
+          .all(op.id),
+      ).toEqual([{ step: "cleanup-intent" }, { step: "cleanup-complete" }]);
       expect(quarantine(retained.id)?.state).toBe("cleaned");
       await expect(lstat(retained.quarantine_path)).rejects.toMatchObject({
         code: "ENOENT",
@@ -806,7 +980,9 @@ async function readFailure(source: "sonarr" | "radarr" = "sonarr") {
 describe("explicit pre-mutation retry", () => {
   for (const source of ["sonarr", "radarr"] as const) {
     it(`${source}: reuses the failed operation only after explicit authorization and never duplicates mutations`, async () => {
+      clearOperationFixtures();
       const { identity, mediaId, op, scan } = await readFailure(source);
+      saveSettings({ safetyMode: "manual" });
       expect(manualRemediationControl(mediaId)).toMatchObject({
         state: "Needs attention",
         retryOperationId: op.id,
@@ -891,6 +1067,11 @@ describe("explicit pre-mutation retry", () => {
     "history-failed",
     "replacement-search",
     "mutation-started",
+    "quarantine-intent",
+    "rescan-command-intent",
+    "history-failed-intent",
+    "replacement-search-intent",
+    "cleanup-intent",
     "unknown-step",
     "quarantine-id",
     "release-key",
@@ -984,5 +1165,99 @@ describe("explicit pre-mutation retry", () => {
     const reason = manualRemediationControl(mediaId).reason!;
     expect(reason.length).toBeLessThan(200);
     expect(reason).not.toContain("secret-api-key");
+  });
+});
+
+function clearOperationFixtures() {
+  // This test file shares one isolated database; manual admission is global.
+  raw().exec(
+    "DELETE FROM operation_steps; DELETE FROM operations; DELETE FROM jobs;",
+  );
+}
+
+describe("realistic scoped history and blocklist contracts", () => {
+  for (const source of ["sonarr", "radarr"] as const) {
+    it.each([
+      "missing-path",
+      "missing-download",
+      "blank-download",
+      "conflicting-import",
+      "conflicting-grab",
+      "shared-download",
+      "unsafe-path",
+      "no-grab-metadata",
+    ] as const)(
+      `${source}: refuses %s before mutation`,
+      async (historyCase) => {
+        const { scan, identity } = await fixture(source);
+        enable();
+        const { client, calls } = mock(identity, { historyCase });
+        expect(await remediate(scan, identity, client)).toBe("needs-attention");
+        expect(calls.every((call) => call.method === "GET")).toBe(true);
+        expect((await lstat(scan.path)).isFile()).toBe(true);
+      },
+    );
+    it.each(["repeated-import", "repeated-grab"] as const)(
+      `${source}: identical repeated release evidence remains correlated (%s)`,
+      async (historyCase) => {
+        const { scan, identity } = await fixture(source);
+        enable();
+        expect(
+          await remediate(
+            scan,
+            identity,
+            mock(identity, { historyCase }).client,
+          ),
+        ).toBe("pending");
+      },
+    );
+    it.each([
+      "absent",
+      "ambiguous",
+      "wrong-title",
+      "wrong-identity",
+      "wrong-protocol",
+      "wrong-indexer",
+      "old-only",
+      "unavailable",
+    ] as const)(
+      `${source}: no search when new blocklist proof is %s`,
+      async (blocklistCase) => {
+        const { scan, identity, mediaId } = await fixture(source);
+        enable();
+        const { client, calls } = mock(identity, { blocklistCase });
+        expect(await remediate(scan, identity, client)).toBe("needs-attention");
+        expect(
+          calls.filter((call) => call.path.includes("/history/failed/")),
+        ).toHaveLength(1);
+        expect(
+          calls.filter((call) =>
+            (call.body as { name?: string })?.name?.endsWith("Search"),
+          ),
+        ).toHaveLength(0);
+        expect(
+          manualRemediationControl(mediaId).retryOperationId,
+        ).toBeUndefined();
+        expect(
+          (
+            await lstat(
+              quarantine(operation(identity.fileId).quarantine_id)!
+                .quarantine_path,
+            )
+          ).isFile(),
+        ).toBe(true);
+      },
+    );
+  }
+  it("Manual mode refuses a direct remediation call without the admitted durable job", async () => {
+    clearOperationFixtures();
+    const { scan, identity } = await fixture();
+    enable();
+    saveSettings({ safetyMode: "manual" });
+    const { client, calls } = mock(identity);
+    await expect(remediate(scan, identity, client)).rejects.toThrow(
+      "explicitly authorized job",
+    );
+    expect(calls).toHaveLength(0);
   });
 });

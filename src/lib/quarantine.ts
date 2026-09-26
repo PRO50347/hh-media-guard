@@ -21,10 +21,10 @@ function permitted() {
   requireRuntimeOwnership();
   if (
     process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true" ||
-    !["quarantine", "automatic"].includes(getSettings().safetyMode)
+    !["manual", "quarantine", "automatic"].includes(getSettings().safetyMode)
   )
     throw new Error(
-      "Explicit quarantine/automatic mode and ALLOW_DESTRUCTIVE_ACTIONS=true are required",
+      "Explicit Manual Fix & Redownload, Quarantine or Automatic mode and ALLOW_DESTRUCTIVE_ACTIONS=true are required",
     );
 }
 async function quarantineRoot() {
@@ -339,6 +339,7 @@ export async function restoreFromQuarantine(id: string) {
 export async function removeVerifiedQuarantine(
   id: string,
   verifyReplacement: () => Promise<void>,
+  beforeCleanup: () => void = () => {},
 ) {
   permitted();
   const item = quarantine(id);
@@ -378,6 +379,7 @@ export async function removeVerifiedQuarantine(
     if (!claimed) throw new Error("Quarantine is already claimed");
     try {
       permitted();
+      beforeCleanup();
       await unlink(pinned);
       await parent.sync();
       raw()

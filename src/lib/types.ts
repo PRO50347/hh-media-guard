@@ -1,4 +1,4 @@
-export type SafetyMode = "monitor" | "quarantine" | "automatic";
+export type SafetyMode = "monitor" | "manual" | "quarantine" | "automatic";
 export type Decision = "pass" | "fail" | "needs-analysis";
 export type JobState =
   | "queued"

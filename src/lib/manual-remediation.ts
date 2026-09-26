@@ -1,3 +1,4 @@
+import { requireManualAdmission } from "./remediation-admission";
 import { randomUUID } from "node:crypto";
 import { fingerprint } from "./scanner";
 import { safeMediaPath } from "./security";
@@ -39,8 +40,8 @@ const identitySchema = z
 export function remediationDisabledReason() {
   if (process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true")
     return "Remediation is disabled: ALLOW_DESTRUCTIVE_ACTIONS must be enabled by the server administrator.";
-  if (getSettings().safetyMode !== "automatic")
-    return "Remediation is disabled: select Automatic mode in Settings to allow quarantine and redownload.";
+  if (!["manual", "automatic"].includes(getSettings().safetyMode))
+    return "Remediation is disabled: select Manual Fix & Redownload or Automatic mode in Settings.";
 }
 
 type MediaRow = {
@@ -228,27 +229,32 @@ export function attentionRemediation(subject: string) {
 }
 
 export function queueManualRemediation(mediaId: string, actor: string) {
-  requireRemediationAllowed();
-  const { media, scan, identity } = loadManualRemediation(mediaId);
-  const operation = operationFor(media);
-  if (operation) return { state: remediationState(operation.state) };
-  const payload = { mediaId, fingerprint: scan.fingerprint!, identity };
-  const existing = raw()
-    .prepare(
-      "SELECT id,state FROM jobs WHERE kind='remediate' AND json_extract(payload,'$.mediaId')=? AND json_extract(payload,'$.fingerprint')=? ORDER BY created_at DESC, id DESC LIMIT 1",
-    )
-    .get(mediaId, scan.fingerprint) as
-    | { id: string; state: string }
-    | undefined;
-  if (existing)
-    return { id: existing.id, state: remediationState(existing.state) };
-  const job = jobQueue.enqueue("remediate", payload);
-  audit(
-    "remediation",
-    `Manual remediation queued for ${mediaId}: ${job.id}`,
-    actor,
-  );
-  return { id: job.id, state: "Fixing" as const };
+  return raw()
+    .transaction(() => {
+      requireRemediationAllowed();
+      const { media, scan, identity } = loadManualRemediation(mediaId);
+      const operation = operationFor(media);
+      if (operation) return { state: remediationState(operation.state) };
+      const payload = { mediaId, fingerprint: scan.fingerprint!, identity };
+      const existing = raw()
+        .prepare(
+          "SELECT id,state FROM jobs WHERE kind='remediate' AND json_extract(payload,'$.mediaId')=? AND json_extract(payload,'$.fingerprint')=? ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .get(mediaId, scan.fingerprint) as
+        | { id: string; state: string }
+        | undefined;
+      if (existing)
+        return { id: existing.id, state: remediationState(existing.state) };
+      requireManualAdmission();
+      const job = jobQueue.enqueue("remediate", payload);
+      audit(
+        "remediation",
+        `Manual remediation queued for ${mediaId}: ${job.id}`,
+        actor,
+      );
+      return { id: job.id, state: "Fixing" as const };
+    })
+    .immediate();
 }
 
 /** Explicit retry preserves the original operation and journals authorization.
@@ -308,6 +314,7 @@ export async function queuePreMutationRetry(
         !sameIdentity(fresh.identity, identity)
       )
         throw new Error("Retry proof changed; manual inspection required");
+      requireManualAdmission("", operationId);
       const token = randomUUID();
       raw()
         .prepare(

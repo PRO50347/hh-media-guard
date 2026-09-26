@@ -39,23 +39,26 @@ const movieSchema = z.object({
 const historySchema = z.object({
   id,
   eventType: z.string(),
-  sourceTitle: z
-    .string()
-    .refine((value) => value.trim().length > 0)
-    .optional(),
-  downloadId: z
-    .string()
-    .refine((value) => value.trim().length > 0)
-    .optional(),
+  sourceTitle: z.string().nullable().optional(),
+  downloadId: z.string().nullable().optional(),
+  seriesId: id.optional(),
   movieId: id.optional(),
   episodeId: id.optional(),
-  // Correlation still requires an exact string path; unrelated Arr metadata may
-  // legitimately be null, numeric, boolean, or structured.
-  data: z
-    .object({ droppedPath: z.string().optional() })
-    .catchall(z.unknown())
-    .optional(),
+  quality: z.unknown().optional(),
+  // Metadata is not authorization: correlation validates the fields it uses.
+  data: z.record(z.unknown()).optional(),
 });
+const blocklistSchema = z.object({
+  id,
+  seriesId: id.optional(),
+  episodeIds: z.array(id).optional(),
+  movieId: id.optional(),
+  sourceTitle: z.string().min(1),
+  protocol: z.enum(["usenet", "torrent"]),
+  indexer: z.string().min(1),
+  quality: z.unknown().optional(),
+});
+export type ArrBlocklist = z.infer<typeof blocklistSchema>;
 export type ArrFile = z.infer<typeof fileSchema>;
 export type ArrHistory = z.infer<typeof historySchema>;
 export type Series = z.infer<typeof seriesSchema>;
@@ -81,7 +84,7 @@ export class ArrClient {
     if (
       method !== "GET" &&
       (process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true" ||
-        getSettings().safetyMode !== "automatic")
+        !["manual", "automatic"].includes(getSettings().safetyMode))
     )
       throw new Error("Arr mutation is disabled in the current safety mode");
     const base = serviceUrl(this.baseUrl);
@@ -129,27 +132,90 @@ export class ArrClient {
       );
     return parsed.data;
   }
-  async history(): Promise<ArrHistory[]> {
-    const result: ArrHistory[] = [];
-    for (let page = 1; page <= 100; page++) {
+  private async boundedPages<T extends { id: number }>(
+    endpoint: string,
+    filters: Record<string, string>,
+    schema: z.ZodType<T>,
+    label: string,
+  ): Promise<T[]> {
+    const result: T[] = [];
+    const seen = new Set<number>();
+    let total: number | undefined;
+    for (let page = 1; page <= 10; page++) {
+      const query = new URLSearchParams({
+        ...filters,
+        page: String(page),
+        pageSize: "100",
+        sortKey: "date",
+        sortDirection: "descending",
+      });
       const parsed = z
-        .object({ records: z.array(historySchema), totalRecords: z.number() })
-        .safeParse(
-          await this.request(
-            `/history?page=${page}&pageSize=100&sortKey=date&sortDirection=descending`,
-          ),
-        );
+        .object({
+          records: z.array(schema).max(100),
+          totalRecords: z.number().int().nonnegative().max(1000),
+        })
+        .safeParse(await this.request(`${endpoint}?${query}`));
       if (!parsed.success)
         throw new SafeError(
-          "arr.history.response",
-          `${this instanceof SonarrClient ? "Sonarr" : "Radarr"} history response could not be parsed`,
+          "arr.scoped.response",
+          `${this instanceof SonarrClient ? "Sonarr" : "Radarr"} ${label} response could not be parsed`,
         );
       const data = parsed.data;
-      result.push(...data.records);
-      if (result.length >= data.totalRecords || !data.records.length)
-        return result;
+      if (
+        (total !== undefined && total !== data.totalRecords) ||
+        data.records.some((row) => seen.has(row.id))
+      )
+        throw new Error(
+          "Arr scoped history or blocklist is incomplete or changed",
+        );
+      total = data.totalRecords;
+      for (const row of data.records) {
+        if (seen.has(row.id))
+          throw new Error(
+            "Arr scoped history or blocklist is incomplete or changed",
+          );
+        seen.add(row.id);
+        result.push(row);
+      }
+      if (result.length === total) return result;
+      if (result.length > total || data.records.length < 100)
+        throw new Error(
+          "Arr scoped history or blocklist is incomplete or changed",
+        );
     }
-    throw new Error("Arr history exceeds the supported page limit");
+    throw new Error(
+      "Arr scoped history or blocklist exceeds the supported limit",
+    );
+  }
+  async history(
+    scope: { episodeId: number } | { movieId: number } | { downloadId: string },
+  ): Promise<ArrHistory[]> {
+    const filters: Record<string, string> =
+      "downloadId" in scope
+        ? {
+            downloadId: z
+              .string()
+              .trim()
+              .min(1)
+              .max(1024)
+              .parse(scope.downloadId),
+          }
+        : "episodeId" in scope
+          ? { episodeId: String(id.parse(scope.episodeId)) }
+          : { movieIds: String(id.parse(scope.movieId)) };
+    return this.boundedPages("/history", filters, historySchema, "history");
+  }
+  async blocklist(
+    scope: { seriesId: number } | { movieId: number },
+  ): Promise<ArrBlocklist[]> {
+    return this.boundedPages(
+      "/blocklist",
+      "seriesId" in scope
+        ? { seriesIds: String(id.parse(scope.seriesId)) }
+        : { movieIds: String(id.parse(scope.movieId)) },
+      blocklistSchema,
+      "blocklist",
+    );
   }
   async queue() {
     return this.request("/queue?pageSize=100");

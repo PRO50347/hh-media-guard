@@ -58,3 +58,24 @@ it.each([
     expect(getSettings()).toMatchObject({ ...fastPatch, ...slowPatch });
   },
 );
+
+it("persists Manual Fix & Redownload separately and keeps the destructive environment gate", async () => {
+  const previous = process.env.ALLOW_DESTRUCTIVE_ACTIONS;
+  const request = () =>
+    POST(
+      new Request("http://fixture/api/settings", {
+        method: "POST",
+        body: JSON.stringify({ safetyMode: "manual" }),
+      }),
+    );
+  try {
+    process.env.ALLOW_DESTRUCTIVE_ACTIONS = "false";
+    expect((await request()).status).toBe(400);
+    expect(getSettings().safetyMode).toBe("monitor");
+    process.env.ALLOW_DESTRUCTIVE_ACTIONS = "true";
+    expect((await request()).status).toBe(200);
+    expect(getSettings().safetyMode).toBe("manual");
+  } finally {
+    process.env.ALLOW_DESTRUCTIVE_ACTIONS = previous;
+  }
+});

@@ -23,7 +23,7 @@ export const settingsSchema = z.object({
   ignoreCommentary: z.literal(true),
   requireMainProgram: z.literal(true),
   unknownBehavior: z.literal("needs-analysis"),
-  safetyMode: z.enum(["monitor", "quarantine", "automatic"]),
+  safetyMode: z.enum(["monitor", "manual", "quarantine", "automatic"]),
   retryLimit: z.number().int().min(1).max(10),
   retryCooldownMinutes: z.number().int().min(1).max(10080),
   quarantinePath: z.string().max(1024).optional(),

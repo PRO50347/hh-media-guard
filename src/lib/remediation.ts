@@ -1,6 +1,9 @@
+import { correlateRelease, corroborateBlocklist } from "./remediation-history";
+import { requireManualAdmission } from "./remediation-admission";
+import type { LeasedJob } from "./job-queue";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { RadarrClient, SonarrClient, type ArrHistory } from "./clients";
+import { RadarrClient, SonarrClient } from "./clients";
 import {
   raw,
   getSettings,
@@ -39,9 +42,9 @@ export function requireRemediationAllowed() {
   requireRuntimeOwnership();
   if (
     process.env.ALLOW_DESTRUCTIVE_ACTIONS !== "true" ||
-    getSettings().safetyMode !== "automatic"
+    !["manual", "automatic"].includes(getSettings().safetyMode)
   )
-    throw new Error("Automatic remediation is disabled");
+    throw new Error("Remediation is disabled");
 }
 function clientFor(source: "sonarr" | "radarr"): Client {
   const config = integration(source);
@@ -66,40 +69,6 @@ function step(id: string, name: string, result: unknown) {
     .run(id, name, JSON.stringify(result), new Date().toISOString());
   audit("remediation", `${id}: ${name}`);
 }
-function correlate(
-  history: ArrHistory[],
-  identity: MediaIdentity,
-  episodeIds: number[],
-) {
-  const related = (h: ArrHistory) =>
-    identity.source === "radarr"
-      ? h.movieId === identity.entityId
-      : Boolean(h.episodeId && episodeIds.includes(h.episodeId));
-  const imports = history.filter(
-    (h) =>
-      related(h) &&
-      h.eventType === "downloadFolderImported" &&
-      h.data?.droppedPath === identity.arrPath &&
-      (!identity.downloadId || h.downloadId === identity.downloadId),
-  );
-  const downloads = [
-    ...new Set(imports.map((h) => h.downloadId).filter(Boolean)),
-  ];
-  if (downloads.length !== 1)
-    throw new Error("Ambiguous imported release history");
-  const grabs = history.filter(
-    (h) => h.eventType === "grabbed" && h.downloadId === downloads[0],
-  );
-  if (
-    !grabs.length ||
-    grabs.some((h) => !related(h)) ||
-    grabs.some((h) => !h.sourceTitle?.trim()) ||
-    new Set(grabs.map((h) => h.sourceTitle)).size !== 1
-  )
-    throw new Error("Ambiguous release identity or multi-title download");
-  return grabs[0];
-}
-
 /** Each non-idempotent external step is journaled BEFORE dispatch. An uncertain
  * response is never retried automatically: the operation requires inspection. */
 export async function remediate(
@@ -109,13 +78,41 @@ export async function remediate(
   signal = new AbortController().signal,
   requireJobOwnership: () => void = () => {},
   retry?: { operationId: string; token: string },
+  manualJob?: LeasedJob,
 ) {
   const authorize = () => {
     requireJobOwnership();
     signal.throwIfAborted();
     requireRemediationAllowed();
+    if (getSettings().safetyMode === "manual") {
+      const job =
+        manualJob &&
+        (raw()
+          .prepare(
+            "SELECT payload FROM jobs WHERE id=? AND kind='remediate' AND state='running' AND lease_token=?",
+          )
+          .get(manualJob.id, manualJob.leaseToken) as
+          | { payload: string }
+          | undefined);
+      const payload = job && JSON.parse(job.payload);
+      if (
+        !payload ||
+        payload.fingerprint !== scan.fingerprint ||
+        !sameIdentity(payload.identity, identity) ||
+        !payload.mediaId
+      )
+        throw new Error(
+          "Manual remediation requires an explicitly authorized job",
+        );
+    }
   };
   authorize();
+  if (getSettings().safetyMode === "manual")
+    raw()
+      .transaction(() =>
+        requireManualAdmission(manualJob!.id, retry?.operationId),
+      )
+      .immediate();
   if (scan.decision !== "fail" || !scan.fingerprint)
     throw new Error("Conclusive failed evidence required");
   const key = createHash("sha256")
@@ -196,9 +193,14 @@ export async function remediate(
     // disabled so Media Guard owns one durable search budget and command.
     if ((await client.downloadHandling()).autoRedownloadFailed)
       throw new Error(
-        "Disable Arr automatic failed-download redownload before using Automatic mode",
+        "Disable Arr automatic failed-download redownload before using remediation",
       );
-    const release = correlate(await client.history(), identity, episodeIds);
+    const release = await correlateRelease(client, identity);
+    const blocklistScope =
+      identity.source === "sonarr"
+        ? { seriesId: identity.seriesId! }
+        : { movieId: identity.entityId };
+    const blocklistBefore = await client.blocklist(blocklistScope);
     const releaseKey = createHash("sha256")
       .update(
         JSON.stringify([
@@ -225,6 +227,7 @@ export async function remediate(
       .prepare("UPDATE operations SET release_key=? WHERE id=?")
       .run(releaseKey, id);
     state(id, "quarantining");
+    step(id, "quarantine-intent", {});
     const quarantineId = await moveToQuarantine(scan, signal, authorize);
     raw()
       .prepare("UPDATE operations SET quarantine_id=? WHERE id=?")
@@ -234,6 +237,7 @@ export async function remediate(
     state(id, "rescanning");
     // Ask Arr to reconcile missing media, rather than DELETE a pathname that an
     // independent importer might concurrently replace.
+    step(id, "rescan-command-intent", {});
     const command = z
       .object({ id: z.number().int().positive() })
       .parse(
@@ -275,10 +279,20 @@ export async function remediate(
       throw new Error("Arr redownload settings changed");
     authorize();
     state(id, "blocklisting");
+    step(id, "history-failed-intent", { historyId: release.id });
     await client.markHistoryFailed(release.id);
     step(id, "history-failed", { historyId: release.id });
     authorize();
+    const blocklistId = corroborateBlocklist(
+      blocklistBefore,
+      await client.blocklist(blocklistScope),
+      release,
+      identity,
+    );
+    step(id, "blocklist-verified", { blocklistId });
+    authorize();
     state(id, "searching");
+    step(id, "replacement-search-intent", {});
     const search = z
       .object({ id: z.number().int().positive() })
       .parse(

@@ -214,3 +214,23 @@ describe("retry and paged media actions", () => {
     ).toBe(true);
   });
 });
+
+it("distinguishes Manual Fix & Redownload from automatic scan remediation in settings", async () => {
+  const { PolicySettings } = await import("../src/components/PolicySettings");
+  const { defaults } = await import("../src/lib/types");
+  const manual = renderToStaticMarkup(
+    createElement(PolicySettings, {
+      initial: { ...defaults(), safetyMode: "manual" },
+      destructiveEnabled: true,
+    }),
+  );
+  expect(manual).toContain("Manual Fix &amp; Redownload");
+  expect(manual).toContain("Scans only inspect media");
+  const automatic = renderToStaticMarkup(
+    createElement(PolicySettings, {
+      initial: { ...defaults(), safetyMode: "automatic" },
+      destructiveEnabled: true,
+    }),
+  );
+  expect(automatic).toContain("every eligible failure");
+});

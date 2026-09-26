@@ -25,10 +25,34 @@ export async function cleanupVerifiedQuarantine(id: string) {
     };
   };
   proof();
-  await removeVerifiedQuarantine(id, async () => {
-    requireRemediationAllowed();
-    const { scan, identity } = proof();
-    await validateReplacementEvidence(scan, identity);
-    requireRemediationAllowed();
-  });
+  const journal = (name: string) => {
+    const op = raw()
+      .prepare(
+        "SELECT id FROM operations WHERE quarantine_id=? AND state='complete'",
+      )
+      .get(id) as { id: string } | undefined;
+    if (!op)
+      throw new Error("A verified PASS replacement is required before cleanup");
+    raw()
+      .prepare(
+        "INSERT INTO operation_steps(operation_id,step,result,created_at) VALUES(?,?,?,?)",
+      )
+      .run(
+        op.id,
+        name,
+        JSON.stringify({ quarantineId: id }),
+        new Date().toISOString(),
+      );
+  };
+  await removeVerifiedQuarantine(
+    id,
+    async () => {
+      requireRemediationAllowed();
+      const { scan, identity } = proof();
+      await validateReplacementEvidence(scan, identity);
+      requireRemediationAllowed();
+    },
+    () => journal("cleanup-intent"),
+  );
+  journal("cleanup-complete");
 }

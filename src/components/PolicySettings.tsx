@@ -92,6 +92,9 @@ export function PolicySettings({
               }
             >
               <option value="monitor">Monitor Only</option>
+              <option value="manual" disabled={!destructiveEnabled}>
+                Manual Fix &amp; Redownload
+              </option>
               <option value="quarantine" disabled={!destructiveEnabled}>
                 Quarantine
               </option>
@@ -107,6 +110,19 @@ export function PolicySettings({
               : "OFF — filesystem and Arr mutations prohibited"}
             .
           </p>
+          {value.safetyMode === "manual" && (
+            <p className="notice">
+              Scans only inspect media. Fix &amp; Redownload acts on one
+              explicitly selected item at a time, including while its
+              replacement is pending.
+            </p>
+          )}
+          {value.safetyMode === "automatic" && (
+            <p className="notice">
+              Automatic mode can quarantine and redownload every eligible
+              failure found by scans, schedules, and webhooks.
+            </p>
+          )}
           {value.safetyMode !== "monitor" && (
             <p className="notice">
               This mode can change media and external services. Use writable
