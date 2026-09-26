@@ -260,7 +260,10 @@ describe("dashboard and work queue navigation", () => {
       action_state: "none",
     }));
     const html = renderToStaticMarkup(
-      createElement(MediaView, { items: rows }),
+      createElement(MediaView, {
+        items: rows.filter((row) => row.decision === "pass"),
+        status: "pass",
+      }),
     );
     expect(html).toContain("pass title");
     expect(html).not.toContain("fail title");

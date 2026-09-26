@@ -18,6 +18,12 @@ import { reserveReplacement } from "./retries";
 import type { ScanResult } from "./types";
 import { safeMediaPath } from "./security";
 import { fingerprint } from "./scanner";
+import {
+  preMutationRetryProof,
+  sameIdentity,
+  type RetryOperation,
+} from "./remediation-retry";
+import { remediationReason } from "./remediation-errors";
 import { requireRuntimeOwnership } from "./runtime-lease";
 
 export interface MediaIdentity {
@@ -87,7 +93,7 @@ function correlate(
   if (
     !grabs.length ||
     grabs.some((h) => !related(h)) ||
-    grabs.some((h) => !h.sourceTitle) ||
+    grabs.some((h) => !h.sourceTitle?.trim()) ||
     new Set(grabs.map((h) => h.sourceTitle)).size !== 1
   )
     throw new Error("Ambiguous release identity or multi-title download");
@@ -102,6 +108,7 @@ export async function remediate(
   provided?: Client,
   signal = new AbortController().signal,
   requireJobOwnership: () => void = () => {},
+  retry?: { operationId: string; token: string },
 ) {
   const authorize = () => {
     requireJobOwnership();
@@ -121,72 +128,70 @@ export async function remediate(
       ]),
     )
     .digest("hex");
-  const id = randomUUID();
+  let id: string = randomUUID();
   const now = new Date().toISOString();
-  const created = raw()
-    .prepare(
-      "INSERT OR IGNORE INTO operations(id,operation_key,source,entity_id,file_id,state,evidence,created_at,updated_at) VALUES(?,?,?,?,?,'planned',?,?,?)",
-    )
-    .run(
-      id,
-      key,
-      identity.source,
-      identity.entityId,
-      identity.fileId,
-      JSON.stringify({ scan, identity }),
-      now,
-      now,
-    ).changes;
+  const created = retry
+    ? 0
+    : raw()
+        .prepare(
+          "INSERT OR IGNORE INTO operations(id,operation_key,source,entity_id,file_id,state,evidence,created_at,updated_at) VALUES(?,?,?,?,?,'planned',?,?,?)",
+        )
+        .run(
+          id,
+          key,
+          identity.source,
+          identity.entityId,
+          identity.fileId,
+          JSON.stringify({ scan, identity }),
+          now,
+          now,
+        ).changes;
   if (!created) {
     const existing = raw()
-      .prepare("SELECT state FROM operations WHERE operation_key=?")
-      .get(key) as { state: string };
-    return existing.state === "needs-attention"
-      ? "needs-attention"
-      : "duplicate";
+      .prepare("SELECT * FROM operations WHERE operation_key=?")
+      .get(key) as RetryOperation;
+    if (!existing)
+      throw new Error("Retry does not match the original operation");
+    if (!retry)
+      return existing.state === "needs-attention"
+        ? "needs-attention"
+        : "duplicate";
+    const claimed = raw()
+      .transaction(() => {
+        authorize();
+        const authorization = raw()
+          .prepare(
+            "SELECT result FROM operation_steps WHERE operation_id=? AND step='retry-authorized' ORDER BY id DESC LIMIT 1",
+          )
+          .get(existing.id) as { result: string } | undefined;
+        if (
+          existing.id !== retry.operationId ||
+          !preMutationRetryProof(existing, "retry-queued") ||
+          !authorization ||
+          JSON.parse(authorization.result).token !== retry.token ||
+          !sameIdentity(JSON.parse(existing.evidence).identity, identity)
+        )
+          throw new Error(
+            "Pre-mutation retry proof is no longer valid; manual inspection required",
+          );
+        return raw()
+          .prepare(
+            "UPDATE operations SET state='planned',updated_at=? WHERE id=? AND state='retry-queued'",
+          )
+          .run(now, existing.id).changes;
+      })
+      .immediate();
+    if (!claimed) throw new Error("Retry already claimed");
+    id = existing.id;
   }
+  let mutationStarted = false;
   try {
     const client = provided || clientFor(identity.source);
-    const current =
-      client instanceof SonarrClient
-        ? await client.episodeFile(identity.fileId)
-        : await client.movieFile(identity.fileId);
-    if (
-      current.id !== identity.fileId ||
-      current.path !== identity.arrPath ||
-      translateArrPath(identity.source, current.path) !== scan.path ||
-      (identity.source === "sonarr"
-        ? current.seriesId !== identity.seriesId
-        : current.movieId !== identity.entityId)
-    )
-      throw new Error("Arr file identity does not match mapped evidence");
-    const currentLanguages = {
-      source: identity.source,
-      entityId: identity.entityId,
-      fileId: current.id,
-      arrPath: current.path,
-      languages: (current.languages || []).map((language) => language.name),
-    };
-    if (
-      decideAudio(scan.duration, scan.tracks, getSettings(), currentLanguages)
-        .decision !== "fail"
-    )
-      throw new Error(
-        "Current exact-file language evidence is not a conclusive failure",
-      );
-    const episodeIds =
-      client instanceof SonarrClient
-        ? (await client.episodes(identity.seriesId!))
-            .filter((e) => e.episodeFileId === identity.fileId)
-            .map((e) => e.id)
-        : [];
-    if (
-      identity.source === "sonarr" &&
-      (episodeIds.length !== 1 || episodeIds[0] !== identity.entityId)
-    )
-      throw new Error(
-        "Single-episode identity is required; multi-episode files need manual attention",
-      );
+    const episodeIds = await validateRemediationIdentity(
+      scan,
+      identity,
+      client,
+    );
     // History failure can itself enqueue a search in Arr. Require that behavior
     // disabled so Media Guard owns one durable search budget and command.
     if ((await client.downloadHandling()).autoRedownloadFailed)
@@ -206,6 +211,10 @@ export async function remediate(
     const downloadKey = createHash("sha256")
       .update(`${identity.source}:download:${release.downloadId}`)
       .digest("hex");
+    // Durable intent precedes even reservation, so a crash can never make a
+    // partially dispatched operation appear safe to replay.
+    mutationStarted = true;
+    step(id, "mutation-started", {});
     reserveReplacement(
       `${identity.source}:${identity.entityId}`,
       releaseKey,
@@ -287,12 +296,8 @@ export async function remediate(
     return "pending";
   } catch (error) {
     state(id, "needs-attention");
-    const safeError =
-      error instanceof Error && error.message.startsWith("Arr ")
-        ? "Arr operation failed or returned inconsistent evidence"
-        : error instanceof Error
-          ? error.message
-          : "Remediation failed";
+    if (!mutationStarted) step(id, "pre-mutation-failure", {});
+    const safeError = remediationReason(error, identity.source);
     raw()
       .prepare("UPDATE operations SET error=? WHERE id=?")
       .run(safeError, id);
@@ -428,4 +433,56 @@ export async function validateReplacementEvidence(
   requireRuntimeOwnership();
   if ((await fingerprint(scan.path, getSettings())) !== scan.fingerprint)
     throw new Error("Replacement changed during verification");
+}
+
+/** Read-only, current exact-file validation shared by initial attempts and
+ * explicit pre-mutation retries. No history rejection or search occurs here. */
+export async function validateRemediationIdentity(
+  scan: ScanResult,
+  identity: MediaIdentity,
+  provided?: Client,
+) {
+  requireRemediationAllowed();
+  const client = provided || clientFor(identity.source);
+  const current =
+    client instanceof SonarrClient
+      ? await client.episodeFile(identity.fileId)
+      : await client.movieFile(identity.fileId);
+  if (
+    current.id !== identity.fileId ||
+    current.path !== identity.arrPath ||
+    translateArrPath(identity.source, current.path) !== scan.path ||
+    (identity.source === "sonarr"
+      ? current.seriesId !== identity.seriesId
+      : current.movieId !== identity.entityId)
+  )
+    throw new Error("Arr file identity does not match mapped evidence");
+  const currentLanguages = {
+    source: identity.source,
+    entityId: identity.entityId,
+    fileId: current.id,
+    arrPath: current.path,
+    languages: (current.languages || []).map((language) => language.name),
+  };
+  if (
+    decideAudio(scan.duration, scan.tracks, getSettings(), currentLanguages)
+      .decision !== "fail"
+  )
+    throw new Error(
+      "Current exact-file language evidence is not a conclusive failure",
+    );
+  const episodeIds =
+    client instanceof SonarrClient
+      ? (await client.episodes(identity.seriesId!))
+          .filter((e) => e.episodeFileId === identity.fileId)
+          .map((e) => e.id)
+      : [];
+  if (
+    identity.source === "sonarr" &&
+    (episodeIds.length !== 1 || episodeIds[0] !== identity.entityId)
+  )
+    throw new Error(
+      "Single-episode identity is required; multi-episode files need manual attention",
+    );
+  return episodeIds;
 }

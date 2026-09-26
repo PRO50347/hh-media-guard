@@ -19,10 +19,17 @@ vi.mock("react", async (original) => ({
 }));
 const mocks = vi.hoisted(() => ({
   refresh: vi.fn(),
-  api: vi.fn(async () => ({ state: "Fixing" })),
+  api: vi.fn<
+    (
+      url: string,
+      options: { method: string; body: string },
+    ) => Promise<{ state: string }>
+  >(async () => ({ state: "Fixing" })),
 }));
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ refresh: mocks.refresh }),
+  useRouter: () => ({ refresh: mocks.refresh, push: vi.fn() }),
+  usePathname: () => "/movies",
+  useSearchParams: () => new URLSearchParams("status=fail&page=2&q=Movie"),
 }));
 vi.mock("../src/components/api", () => ({
   api: mocks.api,
@@ -32,6 +39,7 @@ vi.mock("../src/components/api", () => ({
   }),
 }));
 import { RemediationAction } from "../src/components/RemediationAction";
+import { MediaView } from "../src/components/MediaView";
 import { QuarantineView } from "../src/components/QuarantineView";
 
 const ready: RemediationControl = {
@@ -140,5 +148,69 @@ describe("Fix & Redownload controls", () => {
       method: "DELETE",
       body: '{"id":"copy"}',
     });
+  });
+});
+
+describe("retry and paged media actions", () => {
+  it("labels explicit safe retry and sends its operation ID after confirmation", async () => {
+    const control = {
+      ...ready,
+      state: "Needs attention" as const,
+      retryOperationId: "operation-id",
+      reason: "Sonarr history response could not be parsed",
+    };
+    expect(render(control)).toContain("Retry Fix &amp; Redownload");
+    expect(render(control)).toContain(control.reason);
+    vi.stubGlobal("confirm", () => true);
+    await buttons(RemediationAction({ control }))[0].props.onClick();
+    expect(mocks.api).toHaveBeenCalledWith("/api/jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        kind: "remediate",
+        mediaId: ready.mediaId,
+        retryOperationId: "operation-id",
+      }),
+    });
+  });
+  it("rescans only the filtered current page and preserves search/status in pagination links", async () => {
+    const items = Array.from({ length: 25 }, (_, i) => ({
+      id: String(i + 25),
+      source: "radarr",
+      arr_id: i + 25,
+      title: `Movie ${i + 25}`,
+      path: `/movie-${i + 25}`,
+      decision: "fail",
+      action_state: "none",
+      remediation: { ...ready, mediaId: String(i + 25) },
+    }));
+    const props = {
+      items,
+      total: 2000,
+      page: 2,
+      pages: 80,
+      status: "fail",
+      search: "Movie",
+    };
+    const html = renderToStaticMarkup(createElement(MediaView, props));
+    expect(html).toContain("2000 matching items");
+    expect(html).toContain("Page 2 of 80");
+    expect(html).toContain('href="/movies?status=fail&amp;page=3&amp;q=Movie"');
+    expect(html).toContain('name="q"');
+    expect(html).toContain('method="get"');
+    const allButtons = buttons(MediaView(props));
+    await allButtons[1].props.onClick(); // Search is first; then Rescan displayed media.
+    await vi.waitFor(() => expect(mocks.api).toHaveBeenCalledTimes(25));
+    expect(
+      mocks.api.mock.calls.map(
+        (call) => JSON.parse((call[1] as { body: string }).body).entityId,
+      ),
+    ).toEqual(items.map((row) => row.arr_id));
+    expect(
+      mocks.api.mock.calls.every(
+        (call) =>
+          JSON.parse((call[1] as { body: string }).body).kind ===
+          "scan-library",
+      ),
+    ).toBe(true);
   });
 });

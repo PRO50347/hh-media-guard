@@ -1,14 +1,19 @@
+import { remediationReason } from "@/lib/remediation-errors";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { jobQueue } from "@/lib/store";
 import { requireAdmin } from "@/lib/auth";
 import { jsonBody } from "@/lib/http";
-import { queueManualRemediation } from "@/lib/manual-remediation";
+import {
+  queueManualRemediation,
+  queuePreMutationRetry,
+} from "@/lib/manual-remediation";
 const schema = z.union([
   z
     .object({
       kind: z.literal("remediate"),
       mediaId: z.string().min(1).max(4096),
+      retryOperationId: z.string().uuid().optional(),
     })
     .strict(),
   z.object({
@@ -38,12 +43,20 @@ export async function GET() {
   }
 }
 export async function POST(request: Request) {
+  let manual = false;
   try {
     const actor = await requireAdmin(true);
     const input = schema.parse(await jsonBody(request));
+    manual = input.kind === "remediate";
     if (input.kind === "remediate")
       return NextResponse.json(
-        queueManualRemediation(input.mediaId, actor.username),
+        input.retryOperationId
+          ? await queuePreMutationRetry(
+              input.mediaId,
+              input.retryOperationId,
+              actor.username,
+            )
+          : queueManualRemediation(input.mediaId, actor.username),
         { status: 202 },
       );
     const { kind, ...payload } = input;
@@ -52,7 +65,13 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Request rejected" },
+      {
+        error: manual
+          ? remediationReason(error)
+          : error instanceof Error
+            ? error.message
+            : "Request rejected",
+      },
       { status: 400 },
     );
   }

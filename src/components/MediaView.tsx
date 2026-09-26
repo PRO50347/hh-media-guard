@@ -1,5 +1,6 @@
 "use client";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { useState } from "react";
 import { api, json } from "./api";
 import { RemediationAction, useRemediationRefresh } from "./RemediationAction";
@@ -16,27 +17,41 @@ type Item = {
   details?: string;
   remediation?: RemediationControl;
 };
-export function MediaView({ items }: { items: Item[] }) {
+export function MediaView({
+  items,
+  total = items.length,
+  page = 1,
+  pages = 1,
+  status = "",
+  search = "",
+}: {
+  items: Item[];
+  total?: number;
+  page?: number;
+  pages?: number;
+  status?: string;
+  search?: string;
+}) {
   useRemediationRefresh(items.map((item) => item.remediation));
-  const [search, setSearch] = useState("");
   const params = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
-  const filter = params.get("status") || "";
+  const filter = status;
   function setFilter(value: string) {
     const next = new URLSearchParams(params.toString());
     if (value) next.set("status", value);
     else next.delete("status");
-    router.replace(`${pathname}?${next}`, { scroll: false });
+    next.delete("page");
+    router.push(`${pathname}?${next}`, { scroll: false });
   }
   const [message, setMessage] = useState("");
-  const shown = items.filter(
-    (item) =>
-      `${item.title} ${item.path}`
-        .toLowerCase()
-        .includes(search.toLowerCase()) &&
-      (!filter || item.decision === filter || item.action_state === filter),
-  );
+  // The server supplies exactly one filtered page; actions never include hidden rows.
+  const shown = items;
+  function pageHref(value: number) {
+    const next = new URLSearchParams(params.toString());
+    next.set("page", String(value));
+    return `${pathname}?${next}`;
+  }
   async function rescan(rows: Item[]) {
     try {
       for (const item of rows) {
@@ -60,10 +75,19 @@ export function MediaView({ items }: { items: Item[] }) {
   return (
     <section className="card">
       <div className="form-grid">
-        <label>
-          Search
-          <input value={search} onChange={(e) => setSearch(e.target.value)} />
-        </label>
+        <form action={pathname} method="get">
+          <input type="hidden" name="status" value={filter} />
+          <label>
+            Search
+            <input
+              key={search}
+              name="q"
+              defaultValue={search}
+              maxLength={256}
+            />
+          </label>
+          <button type="submit">Search</button>
+        </form>
         <label>
           Status
           <select value={filter} onChange={(e) => setFilter(e.target.value)}>
@@ -77,6 +101,9 @@ export function MediaView({ items }: { items: Item[] }) {
           </select>
         </label>
       </div>
+      <p>
+        {total} matching items · Page {page} of {pages}
+      </p>
       <button disabled={!shown.length} onClick={() => void rescan(shown)}>
         Rescan displayed media ({shown.length})
       </button>
@@ -127,6 +154,20 @@ export function MediaView({ items }: { items: Item[] }) {
         <p className="empty">
           No matching media. Start a library audit to discover mapped files.
         </p>
+      )}
+      {pages > 1 && (
+        <div className="actions" role="group" aria-label="Media pages">
+          {page > 1 && (
+            <Link className="button" href={pageHref(page - 1)}>
+              Previous page
+            </Link>
+          )}
+          {page < pages && (
+            <Link className="button" href={pageHref(page + 1)}>
+              Next page
+            </Link>
+          )}
+        </div>
       )}
     </section>
   );

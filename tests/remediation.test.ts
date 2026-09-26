@@ -44,6 +44,7 @@ import { encryptSecret } from "../src/lib/crypto";
 import * as transportModule from "../src/lib/arr-transport";
 import {
   queueManualRemediation,
+  queuePreMutationRetry,
   manualRemediationControl,
   attentionRemediation,
 } from "../src/lib/manual-remediation";
@@ -138,6 +139,8 @@ function mock(
   identity: MediaIdentity,
   options: {
     redownload?: boolean;
+    badHistory?: boolean;
+    wrongHistory?: "path" | "download" | "identity";
     failSearch?: boolean;
     failReject?: boolean;
     ambiguous?: boolean;
@@ -184,18 +187,39 @@ function mock(
           id: 1,
           eventType: "downloadFolderImported",
           downloadId: identity.downloadId,
-          data: { droppedPath: identity.arrPath },
+          data: {
+            droppedPath:
+              options.wrongHistory === "path"
+                ? "/wrong/path"
+                : identity.arrPath,
+            imdbId: null,
+            releaseGroup: null,
+            unrelated: null,
+            score: 7,
+            extra: { present: false },
+          },
           ...reference,
         },
         {
           id: 2,
           eventType: "grabbed",
           downloadId: identity.downloadId,
-          sourceTitle: `Fixture.Release.${identity.entityId}`,
-          data: { indexerId: "1" },
+          sourceTitle: options.badHistory
+            ? null
+            : `Fixture.Release.${identity.entityId}`,
+          data: { indexerId: "1", imdbId: null, releaseGroup: null },
           ...reference,
         },
       ];
+      if (options.wrongHistory === "download")
+        records[1].downloadId = "unrelated-download";
+      if (options.wrongHistory === "identity")
+        Object.assign(
+          records[1],
+          identity.source === "sonarr"
+            ? { episodeId: 999999 }
+            : { movieId: 999999 },
+        );
       return {
         records: options.ambiguous ? [] : records,
         totalRecords: options.ambiguous ? 0 : records.length,
@@ -768,4 +792,197 @@ describe("manual remediation retains language and retry guards", () => {
       expect((await lstat(scan.path)).isFile()).toBe(true);
     },
   );
+});
+
+async function readFailure(source: "sonarr" | "radarr" = "sonarr") {
+  const data = await fixture(source);
+  enable();
+  wire(data.identity, { badHistory: true });
+  await runQueued(queueManualRemediation(data.mediaId, "fixture-admin").id!);
+  expect(operation(data.identity.fileId).state).toBe("needs-attention");
+  return { ...data, op: operation(data.identity.fileId) };
+}
+
+describe("explicit pre-mutation retry", () => {
+  for (const source of ["sonarr", "radarr"] as const) {
+    it(`${source}: reuses the failed operation only after explicit authorization and never duplicates mutations`, async () => {
+      const { identity, mediaId, op, scan } = await readFailure(source);
+      expect(manualRemediationControl(mediaId)).toMatchObject({
+        state: "Needs attention",
+        retryOperationId: op.id,
+        reason: `${source === "sonarr" ? "Sonarr" : "Radarr"} history response could not be parsed`,
+      });
+      const { calls } = wire(identity);
+      // The normal action still refuses replay.
+      expect(queueManualRemediation(mediaId, "fixture-admin").state).toBe(
+        "Needs attention",
+      );
+      expect(calls).toHaveLength(0);
+      const retry = await (
+        await requestRemediation(mediaId, { retryOperationId: op.id })
+      ).json();
+      expect(retry.state).toBe("Fixing");
+      expect(
+        await (
+          await requestRemediation(mediaId, { retryOperationId: op.id })
+        ).json(),
+      ).toEqual(retry);
+      await runQueued(retry.id);
+      expect(operation(identity.fileId)).toMatchObject({
+        id: op.id,
+        state: "pending",
+      });
+      expect(
+        calls.filter((call) => call.method === "POST").map((call) => call.path),
+      ).toEqual([
+        "/api/v3/command",
+        "/api/v3/history/failed/2",
+        "/api/v3/command",
+      ]);
+      expect(
+        raw()
+          .prepare(
+            "SELECT COUNT(*) n FROM operations WHERE source=? AND entity_id=?",
+          )
+          .get(source, identity.entityId),
+      ).toEqual({ n: 1 });
+      expect(
+        manualRemediationControl(mediaId).retryOperationId,
+      ).toBeUndefined();
+      await expect(
+        queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
+      ).rejects.toThrow("not proven");
+      await expect(lstat(scan.path)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+  }
+  it("recognizes the legacy nullable-metadata parser failure without clearing old evidence", async () => {
+    const { identity, mediaId, op } = await readFailure();
+    raw()
+      .prepare("DELETE FROM operation_steps WHERE operation_id=?")
+      .run(op.id);
+    const legacy = JSON.stringify(
+      ["imdbId", "releaseGroup"].map((field) => ({
+        code: "invalid_type",
+        expected: "string",
+        received: "null",
+        path: ["records", 0, "data", field],
+        message: "Expected string, received null",
+      })),
+    );
+    raw()
+      .prepare("UPDATE operations SET error=? WHERE id=?")
+      .run(legacy, op.id);
+    expect(manualRemediationControl(mediaId).retryOperationId).toBe(op.id);
+    const oldEvidence = raw()
+      .prepare("SELECT evidence FROM operations WHERE id=?")
+      .get(op.id);
+    wire(identity);
+    await runQueued(
+      (await queuePreMutationRetry(mediaId, op.id, "fixture-admin")).id,
+    );
+    expect(
+      raw().prepare("SELECT evidence FROM operations WHERE id=?").get(op.id),
+    ).toEqual(oldEvidence);
+    expect(operation(identity.fileId).state).toBe("pending");
+  });
+  it.each([
+    "quarantine",
+    "rescan-command",
+    "history-failed",
+    "replacement-search",
+    "mutation-started",
+    "unknown-step",
+    "quarantine-id",
+    "release-key",
+    "reservation",
+    "orphan-quarantine",
+    "no-proof",
+  ])("refuses unsafe or uncertain history: %s", async (blocker) => {
+    const { identity, mediaId, op, scan } = await readFailure();
+    if (blocker === "quarantine-id")
+      raw()
+        .prepare("UPDATE operations SET quarantine_id='copy' WHERE id=?")
+        .run(op.id);
+    else if (blocker === "release-key")
+      raw()
+        .prepare("UPDATE operations SET release_key='reserved' WHERE id=?")
+        .run(op.id);
+    else if (blocker === "reservation")
+      raw()
+        .prepare("INSERT INTO retry_titles VALUES(?,1,0,0)")
+        .run(`${identity.source}:${identity.entityId}`);
+    else if (blocker === "orphan-quarantine")
+      raw()
+        .prepare("INSERT INTO quarantines VALUES(?,?,?,?,?,?,?)")
+        .run(
+          `orphan-${op.id}`,
+          scan.path,
+          "/unused",
+          "{}",
+          "needs-attention",
+          "fixture",
+          null,
+        );
+    else if (blocker === "no-proof")
+      raw()
+        .prepare("DELETE FROM operation_steps WHERE operation_id=?")
+        .run(op.id);
+    else
+      raw()
+        .prepare(
+          "INSERT INTO operation_steps(operation_id,step,result,created_at) VALUES(?,?,?,?)",
+        )
+        .run(op.id, blocker, "{}", "fixture");
+    const { calls } = wire(identity);
+    expect(manualRemediationControl(mediaId).retryOperationId).toBeUndefined();
+    await expect(
+      queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
+    ).rejects.toThrow("not proven");
+    expect(calls).toHaveLength(0);
+    expect((await lstat(scan.path)).isFile()).toBe(true);
+  });
+  it("rechecks safety, current file evidence and live exact identity on explicit retry", async () => {
+    const { identity, mediaId, op, scan } = await readFailure();
+    process.env.ALLOW_DESTRUCTIVE_ACTIONS = "false";
+    await expect(
+      queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
+    ).rejects.toThrow("disabled");
+    enable();
+    wire(identity, { wrongFile: true });
+    await expect(
+      queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
+    ).rejects.toThrow("identity");
+    wire(identity);
+    saveScan({ ...scan, decision: "needs-analysis" });
+    expect(manualRemediationControl(mediaId).eligible).toBe(false);
+    await expect(
+      queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
+    ).rejects.toThrow("evidence");
+    saveScan(scan);
+    await writeFile(scan.path, "changed active file");
+    await expect(
+      queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
+    ).rejects.toThrow("changed");
+  });
+  it.each(["path", "download", "identity"] as const)(
+    "never relaxes history %s correlation",
+    async (wrongHistory) => {
+      const { identity, mediaId, scan } = await fixture("sonarr");
+      enable();
+      const { calls } = wire(identity, { wrongHistory });
+      await runQueued(queueManualRemediation(mediaId, "fixture-admin").id!);
+      expect(operation(identity.fileId).state).toBe("needs-attention");
+      expect(calls.every((call) => call.method === "GET")).toBe(true);
+      expect((await lstat(scan.path)).isFile()).toBe(true);
+    },
+  );
+  it("never renders arbitrary stored errors as a visible remediation reason", async () => {
+    const { mediaId, op } = await readFailure();
+    raw()
+      .prepare("UPDATE operations SET error=? WHERE id=?")
+      .run("secret-api-key huge-server-body".repeat(500), op.id);
+    const reason = manualRemediationControl(mediaId).reason!;
+    expect(reason.length).toBeLessThan(200);
+    expect(reason).not.toContain("secret-api-key");
+  });
 });

@@ -1,6 +1,8 @@
 export type RemediationControl = {
   mediaId: string;
   eligible: boolean;
+  retryOperationId?: string;
+  reason?: string;
   disabledReason?: string;
   state:
     | "Ready"

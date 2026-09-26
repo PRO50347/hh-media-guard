@@ -1,3 +1,4 @@
+import { remediationReason } from "./remediation-errors";
 import { loadManualRemediation } from "./manual-remediation";
 import { requireRemediationAllowed } from "./remediation";
 import { InspectionError } from "./process";
@@ -109,6 +110,7 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
       mediaId: string;
       fingerprint: string;
       identity: MediaIdentity;
+      retry?: { operationId: string; token: string };
     };
     try {
       owns(job, signal);
@@ -130,13 +132,24 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
         throw new Error(
           "Media identity or evidence changed after the request. Rescan first.",
         );
+      if (
+        payload.retry &&
+        ((await safeMediaPath(scan.path, roots())) !== scan.path ||
+          (await fingerprint(scan.path, getSettings())) !== scan.fingerprint)
+      )
+        throw new Error("Media or policy changed since scanning");
       jobQueue.progress(
         job,
         10,
         "Fixing: validating and quarantining failed media",
       );
-      const result = await remediate(scan, identity, undefined, signal, () =>
-        owns(job, signal),
+      const result = await remediate(
+        scan,
+        identity,
+        undefined,
+        signal,
+        () => owns(job, signal),
+        payload.retry,
       );
       owns(job, signal);
       jobQueue.finish(
@@ -148,8 +161,14 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
       );
     } catch (error) {
       if (signal.aborted) throw error;
-      const message =
-        error instanceof Error ? error.message : "Remediation refused";
+      const message = remediationReason(error, payload.identity?.source);
+      if (payload.retry && jobQueue.heartbeat(job)) {
+        raw()
+          .prepare(
+            "UPDATE operations SET state='needs-attention',error=? WHERE id=? AND state='retry-queued'",
+          )
+          .run(message, payload.retry.operationId);
+      }
       needsAttention(job.id, "manual remediation refused", {
         mediaId: payload.mediaId,
         reason: message,

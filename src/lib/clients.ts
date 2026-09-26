@@ -39,11 +39,22 @@ const movieSchema = z.object({
 const historySchema = z.object({
   id,
   eventType: z.string(),
-  sourceTitle: z.string().optional(),
-  downloadId: z.string().optional(),
+  sourceTitle: z
+    .string()
+    .refine((value) => value.trim().length > 0)
+    .optional(),
+  downloadId: z
+    .string()
+    .refine((value) => value.trim().length > 0)
+    .optional(),
   movieId: id.optional(),
   episodeId: id.optional(),
-  data: z.record(z.string()).optional(),
+  // Correlation still requires an exact string path; unrelated Arr metadata may
+  // legitimately be null, numeric, boolean, or structured.
+  data: z
+    .object({ droppedPath: z.string().optional() })
+    .catchall(z.unknown())
+    .optional(),
 });
 export type ArrFile = z.infer<typeof fileSchema>;
 export type ArrHistory = z.infer<typeof historySchema>;
@@ -121,13 +132,19 @@ export class ArrClient {
   async history(): Promise<ArrHistory[]> {
     const result: ArrHistory[] = [];
     for (let page = 1; page <= 100; page++) {
-      const data = z
+      const parsed = z
         .object({ records: z.array(historySchema), totalRecords: z.number() })
-        .parse(
+        .safeParse(
           await this.request(
             `/history?page=${page}&pageSize=100&sortKey=date&sortDirection=descending`,
           ),
         );
+      if (!parsed.success)
+        throw new SafeError(
+          "arr.history.response",
+          `${this instanceof SonarrClient ? "Sonarr" : "Radarr"} history response could not be parsed`,
+        );
+      const data = parsed.data;
       result.push(...data.records);
       if (result.length >= data.totalRecords || !data.records.length)
         return result;

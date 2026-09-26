@@ -26,15 +26,23 @@ export function RemediationAction({
           {state}
         </p>
       )}
+      {control.reason && <p className="muted">{control.reason}</p>}
       {control.eligible && (
         <>
           <button
-            disabled={busy || submitted || !!control.disabledReason}
+            disabled={
+              busy ||
+              (submitted && control.state === "Ready") ||
+              !!control.disabledReason
+            }
             aria-describedby={descriptionId}
             onClick={async () => {
               if (
                 !confirm(
-                  "Fix & Redownload this file? The failed file will be quarantined and removed from the active media path. Sonarr/Radarr will reject the correlated release and search for a replacement. The quarantine copy is retained for recovery until a verified replacement and explicit cleanup.",
+                  (control.retryOperationId
+                    ? "Retry the previously failed operation? The server will recheck that no mutation began, that the active file is unchanged, and that Arr identity still matches. "
+                    : "") +
+                    "Fix & Redownload this file? The failed file will be quarantined and removed from the active media path. Sonarr/Radarr will reject the correlated release and search for a replacement. The quarantine copy is retained for recovery until a verified replacement and explicit cleanup.",
                 )
               )
                 return;
@@ -43,7 +51,13 @@ export function RemediationAction({
               try {
                 await api(
                   "/api/jobs",
-                  json("POST", { kind: "remediate", mediaId: control.mediaId }),
+                  json("POST", {
+                    kind: "remediate",
+                    mediaId: control.mediaId,
+                    ...(control.retryOperationId
+                      ? { retryOperationId: control.retryOperationId }
+                      : {}),
+                  }),
                 );
                 setSubmitted(true);
                 router.refresh();
@@ -54,7 +68,9 @@ export function RemediationAction({
               }
             }}
           >
-            Fix &amp; Redownload
+            {control.retryOperationId
+              ? "Retry Fix & Redownload"
+              : "Fix & Redownload"}
           </button>
           <p id={descriptionId} className="muted">
             {control.disabledReason ||

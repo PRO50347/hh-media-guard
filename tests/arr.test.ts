@@ -353,3 +353,64 @@ it("uses bounded single-title routes when a scope supplies its identity", async 
     { signal: undefined },
   );
 });
+
+describe("real Arr history metadata", () => {
+  for (const [name, Client] of [
+    ["Sonarr", SonarrClient],
+    ["Radarr", RadarrClient],
+  ] as const) {
+    it(`${name}: preserves exact correlation fields while accepting nullable and non-string extras`, async () => {
+      const record = {
+        id: 1,
+        eventType: "downloadFolderImported",
+        downloadId: "exact-download",
+        sourceTitle: "Exact.Release",
+        episodeId: 12,
+        movieId: 34,
+        data: {
+          droppedPath: "/arr/exact.mkv",
+          imdbId: null,
+          releaseGroup: null,
+          unrelated: null,
+          score: 4,
+          custom: { enabled: true },
+        },
+      };
+      const client = new Client("http://fixture.test", "secret", async () => ({
+        records: [record],
+        totalRecords: 1,
+      }));
+      expect(await client.history()).toEqual([record]);
+    });
+    it.each([
+      { data: { droppedPath: null } },
+      { data: { droppedPath: 4 } },
+      { sourceTitle: "   " },
+      { downloadId: 123 },
+      { downloadId: " " },
+      { episodeId: "12" },
+    ])(
+      `${name}: refuses invalid relied-on fields without exposing response content (%j)`,
+      async (invalid) => {
+        const client = new Client(
+          "http://fixture.test",
+          "secret",
+          async () => ({
+            records: [
+              {
+                id: 1,
+                eventType: "grabbed",
+                sourceTitle: "secret-response-body",
+                ...invalid,
+              },
+            ],
+            totalRecords: 1,
+          }),
+        );
+        await expect(client.history()).rejects.toThrow(
+          `${name} history response could not be parsed`,
+        );
+      },
+    );
+  }
+});

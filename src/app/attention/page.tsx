@@ -19,7 +19,9 @@ export default async function Attention({
   queue.items = queue.items.map((item) => ({
     ...item,
     remediation:
-      item.reason === "missing required language" && item.state === "open"
+      ["missing required language", "replacement failure"].includes(
+        item.reason,
+      ) && item.state === "open"
         ? attentionRemediation(item.subject)
         : undefined,
   }));
