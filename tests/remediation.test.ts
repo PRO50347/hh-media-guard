@@ -1,3 +1,9 @@
+import * as historyModule from "../src/lib/remediation-history";
+import { requireManualAdmission } from "../src/lib/remediation-admission";
+import {
+  preMutationRetryProof,
+  type RetryOperation,
+} from "../src/lib/remediation-retry";
 import {
   beforeAll,
   afterAll,
@@ -138,6 +144,7 @@ function enable() {
 function mock(
   identity: MediaIdentity,
   options: {
+    renamed?: boolean;
     historyCase?:
       | "missing-path"
       | "missing-download"
@@ -293,6 +300,18 @@ function mock(
       const imported = shaped[0];
       const grabbed = shaped[1];
       const data = imported.data as Record<string, unknown>;
+      if (options.renamed) {
+        data.importedPath = identity.arrPath + ".original";
+        shaped.push({
+          id: 5,
+          ...reference,
+          eventType:
+            identity.source === "sonarr"
+              ? "episodeFileRenamed"
+              : "movieFileRenamed",
+          data: { sourcePath: data.importedPath, path: identity.arrPath },
+        });
+      }
       if (options.historyCase === "missing-path") delete data.importedPath;
       if (options.historyCase === "unsafe-path")
         data.importedPath = "/tv/../" + identity.arrPath;
@@ -322,7 +341,7 @@ function mock(
           ? shaped.filter(
               (row) => row.downloadId === url.searchParams.get("downloadId"),
             )
-          : shaped.filter((row) => row.eventType === "downloadFolderImported");
+          : shaped.filter((row) => row.eventType !== "grabbed");
       return { records: selected, totalRecords: selected.length };
     }
     if (endpoint === "/blocklist") {
@@ -1181,6 +1200,7 @@ describe("realistic scoped history and blocklist contracts", () => {
       "missing-path",
       "missing-download",
       "blank-download",
+      "repeated-import",
       "conflicting-import",
       "conflicting-grab",
       "shared-download",
@@ -1197,7 +1217,7 @@ describe("realistic scoped history and blocklist contracts", () => {
         expect((await lstat(scan.path)).isFile()).toBe(true);
       },
     );
-    it.each(["repeated-import", "repeated-grab"] as const)(
+    it.each(["repeated-grab"] as const)(
       `${source}: identical repeated release evidence remains correlated (%s)`,
       async (historyCase) => {
         const { scan, identity } = await fixture(source);
@@ -1259,5 +1279,165 @@ describe("realistic scoped history and blocklist contracts", () => {
       "explicitly authorized job",
     );
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("rename failure retry and legacy admission", () => {
+  for (const source of ["sonarr", "radarr"] as const) {
+    it(`${source}: retries the old pre-mutation rename failure without replacing its evidence`, async () => {
+      clearOperationFixtures();
+      const { identity, mediaId, scan } = await fixture(source);
+      enable();
+      saveSettings({ safetyMode: "manual" });
+      wire(identity, { renamed: true });
+      // Reproduce v0.2.7's direct-only correlation failure against unchanged
+      // Arr rename history, then restore the corrected correlation implementation.
+      const oldRule = vi
+        .spyOn(historyModule, "correlateRelease")
+        .mockRejectedValueOnce(new Error("Ambiguous imported release history"));
+      await runQueued(queueManualRemediation(mediaId, "fixture-admin").id!);
+      oldRule.mockRestore();
+      const op = operation(identity.fileId);
+      const original = raw()
+        .prepare("SELECT evidence,error FROM operations WHERE id=?")
+        .get(op.id);
+      expect(op.state).toBe("needs-attention");
+      expect(
+        raw()
+          .prepare("SELECT step FROM operation_steps WHERE operation_id=?")
+          .all(op.id),
+      ).toEqual([{ step: "pre-mutation-failure" }]);
+      expect(manualRemediationControl(mediaId).retryOperationId).toBe(op.id);
+      const { calls } = wire(identity, { renamed: true });
+      await runQueued(
+        (await queuePreMutationRetry(mediaId, op.id, "fixture-admin")).id,
+      );
+      expect(operation(identity.fileId)).toMatchObject({
+        id: op.id,
+        state: "pending",
+      });
+      expect(
+        raw()
+          .prepare("SELECT evidence,error FROM operations WHERE id=?")
+          .get(op.id),
+      ).toEqual(original);
+      expect(
+        calls.filter((c) =>
+          (c.body as { name?: string })?.name?.endsWith("Search"),
+        ),
+      ).toHaveLength(1);
+      await expect(lstat(scan.path)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(() => requireManualAdmission()).toThrow("only one item");
+    });
+  }
+  const legacy =
+    "Disable Arr automatic failed-download redownload before using Automatic mode";
+  async function legacyFailure() {
+    clearOperationFixtures();
+    const data = await readFailure();
+    raw()
+      .prepare("DELETE FROM operation_steps WHERE operation_id=?")
+      .run(data.op.id);
+    raw()
+      .prepare("UPDATE operations SET error=? WHERE id=?")
+      .run(legacy, data.op.id);
+    saveSettings({ safetyMode: "manual" });
+    return data;
+  }
+  it("exact legacy refusal no longer blocks admission and can retry without erasing evidence", async () => {
+    const { identity, mediaId, op } = await legacyFailure();
+    const evidence = raw()
+      .prepare("SELECT evidence FROM operations WHERE id=?")
+      .get(op.id);
+    expect(() => requireManualAdmission()).not.toThrow();
+    expect(manualRemediationControl(mediaId).retryOperationId).toBe(op.id);
+    wire(identity);
+    await runQueued(
+      (await queuePreMutationRetry(mediaId, op.id, "fixture-admin")).id,
+    );
+    expect(operation(identity.fileId).state).toBe("pending");
+    expect(
+      raw().prepare("SELECT evidence FROM operations WHERE id=?").get(op.id),
+    ).toEqual(evidence);
+    expect(() => requireManualAdmission()).toThrow("only one item");
+  });
+  it.each([
+    "different-error",
+    "empty-release-key",
+    "empty-quarantine-id",
+    "wrong-state",
+    "release-key",
+    "quarantine-id",
+    "quarantine-intent",
+    "rescan-command-intent",
+    "history-failed-intent",
+    "replacement-search-intent",
+    "mutation-started",
+    "unknown-step",
+    "title-reservation",
+    "release-reservation",
+    "orphan-quarantine",
+  ])("legacy signature still blocks with %s", async (blocker) => {
+    const { identity, op, scan } = await legacyFailure();
+    if (blocker === "empty-release-key")
+      raw()
+        .prepare("UPDATE operations SET release_key='' WHERE id=?")
+        .run(op.id);
+    else if (blocker === "empty-quarantine-id")
+      raw()
+        .prepare("UPDATE operations SET quarantine_id='' WHERE id=?")
+        .run(op.id);
+    else if (blocker === "different-error")
+      raw()
+        .prepare("UPDATE operations SET error=? WHERE id=?")
+        .run(legacy + ".", op.id);
+    else if (blocker === "wrong-state")
+      raw()
+        .prepare("UPDATE operations SET state='pending' WHERE id=?")
+        .run(op.id);
+    else if (blocker === "release-key")
+      raw()
+        .prepare("UPDATE operations SET release_key='reserved' WHERE id=?")
+        .run(op.id);
+    else if (blocker === "quarantine-id")
+      raw()
+        .prepare("UPDATE operations SET quarantine_id='copy' WHERE id=?")
+        .run(op.id);
+    else if (blocker === "title-reservation")
+      raw()
+        .prepare("INSERT INTO retry_titles VALUES(?,1,0,0)")
+        .run(`${identity.source}:${identity.entityId}`);
+    else if (blocker === "release-reservation") {
+      reserveReplacement(
+        `${identity.source}:${identity.entityId}`,
+        `legacy-release-${identity.entityId}`,
+        Date.now(),
+      );
+      raw()
+        .prepare("DELETE FROM retry_titles WHERE identity=?")
+        .run(`${identity.source}:${identity.entityId}`);
+    } else if (blocker === "orphan-quarantine")
+      raw()
+        .prepare("INSERT INTO quarantines VALUES(?,?,?,?,?,?,?)")
+        .run(
+          `legacy-${op.id}`,
+          scan.path,
+          "/unused",
+          "{}",
+          "needs-attention",
+          "fixture",
+          null,
+        );
+    else
+      raw()
+        .prepare(
+          "INSERT INTO operation_steps(operation_id,step,result,created_at) VALUES(?,?,?,?)",
+        )
+        .run(op.id, blocker, "{}", "fixture");
+    const stored = raw()
+      .prepare("SELECT * FROM operations WHERE id=?")
+      .get(op.id) as RetryOperation;
+    expect(preMutationRetryProof(stored)).toBe(false);
+    expect(() => requireManualAdmission()).toThrow("only one item");
   });
 });

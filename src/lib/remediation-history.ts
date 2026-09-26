@@ -62,6 +62,54 @@ function releaseEvidence(h: ArrHistory) {
   });
 }
 
+// Reverse the exact rename chain from the current path. Inspect only touching
+// transitions: unrelated historical renames cannot invalidate this file's proof.
+const MAX_RENAME_HOPS = 16;
+function importPaths(
+  history: ArrHistory[],
+  identity: MediaIdentity,
+  target: string,
+) {
+  const eventType =
+    identity.source === "sonarr" ? "episodeFileRenamed" : "movieFileRenamed";
+  const renames = history
+    .filter((h) => h.eventType === eventType)
+    .map((event) => ({
+      event,
+      from: libraryPath(event.data?.sourcePath),
+      to: libraryPath(event.data?.path),
+    }));
+  const paths = new Set<string>();
+  let current = target;
+  let hops = 0;
+  for (;;) {
+    if (paths.has(current))
+      throw new Error("Ambiguous imported release history");
+    paths.add(current);
+    const touching = renames.filter(
+      (edge) => edge.from === current || edge.to === current,
+    );
+    if (
+      touching.some(
+        (edge) => !related(edge.event, identity) || !edge.from || !edge.to,
+      )
+    )
+      throw new Error("Ambiguous imported release history");
+    const incoming = touching.filter((edge) => edge.to === current);
+    const outgoing = touching.filter((edge) => edge.from === current);
+    if (
+      incoming.length > 1 ||
+      outgoing.length > 1 ||
+      (current === target && outgoing.length > 0)
+    )
+      throw new Error("Ambiguous imported release history");
+    if (!incoming.length) return paths;
+    if (++hops > MAX_RENAME_HOPS)
+      throw new Error("Ambiguous imported release history");
+    current = incoming[0].from!;
+  }
+}
+
 export async function correlateRelease(
   client: ArrClient,
   identity: MediaIdentity,
@@ -87,13 +135,12 @@ export async function correlateRelease(
     )
   )
     throw new Error("Ambiguous imported release history");
-  const matching = imports.filter(
-    (h) => libraryPath(h.data?.importedPath) === target,
+  const paths = importPaths(history, identity, target);
+  const matching = imports.filter((h) =>
+    paths.has(libraryPath(h.data?.importedPath)!),
   );
-  const downloads = new Set(matching.map((h) => h.downloadId));
   if (
-    !matching.length ||
-    downloads.size !== 1 ||
+    matching.length !== 1 ||
     (identity.downloadId !== undefined &&
       !matching.every((h) => h.downloadId === identity.downloadId))
   )

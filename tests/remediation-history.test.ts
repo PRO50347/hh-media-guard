@@ -157,3 +157,154 @@ describe("version-pinned Arr history contracts", () => {
       expect(url.searchParams.get("movieIds")).toBe("42");
   });
 });
+
+describe("exact Arr rename chains", () => {
+  for (const source of ["sonarr", "radarr"] as const) {
+    it.each([
+      "direct",
+      "one-hop",
+      "two-hop",
+      "missing-link",
+      "source-mismatch",
+      "destination-mismatch",
+      "fork",
+      "predecessors",
+      "cycle",
+      "two-imports",
+      "duplicate-import",
+      "unrelated",
+      "missing-source",
+      "missing-destination",
+      "wrong-identity",
+      "unsafe",
+      "hop-limit",
+      "hop-boundary",
+      "renamed-away",
+      "shared-download",
+    ])(`${source}: %s`, async (scenario) => {
+      const a =
+        "/tv/ALF/Season 04/ALF - S04E01 - Baby, Come Back WEBDL-720p.mkv";
+      const b = "/tv/ALF/Season 04/ALF - S04E01 - Baby, Come Back.mkv";
+      const c = "/tv/ALF/Season 04/ALF - S04E01 - Baby, Come Back Final.mkv";
+      const ref =
+        source === "sonarr" ? { episodeId: 42, seriesId: 7 } : { movieId: 42 };
+      const identity = {
+        source,
+        entityId: 42,
+        seriesId: 7,
+        fileId: 123,
+        arrPath: scenario === "two-hop" || scenario === "missing-link" ? c : b,
+      };
+      const imported = {
+        id: 1,
+        ...ref,
+        eventType: "downloadFolderImported",
+        sourceTitle: "Alf S04E01 German 720p WEB x264-TVNATiON",
+        downloadId: "original-download",
+        data: {
+          importedPath: scenario === "direct" ? b : a,
+          droppedPath:
+            "/downloads/tv_series/Alf S04E01 German 720p WEB x264-TVNATiON/Alf.S04E01.German.720p.WEB.x264-TVNATiON.mkv",
+        },
+      };
+      const grab = {
+        id: 2,
+        ...ref,
+        eventType: "grabbed",
+        sourceTitle: imported.sourceTitle,
+        downloadId: imported.downloadId,
+        quality: { quality: { id: 5 }, revision: { version: 1 } },
+        data: {
+          indexer: "Fixture",
+          protocol: "1",
+          size: "12345",
+          publishedDate: "2026-01-01T00:00:00Z",
+          imdbId: null,
+          releaseGroup: null,
+        },
+      };
+      const rename = (
+        id: number,
+        from: string | undefined,
+        to: string | undefined,
+      ) => ({
+        id,
+        ...ref,
+        eventType:
+          source === "sonarr" ? "episodeFileRenamed" : "movieFileRenamed",
+        data: { sourcePath: from, path: to },
+      });
+      const records: unknown[] = [imported];
+      if (scenario !== "direct") records.push(rename(3, a, b));
+      if (scenario === "two-hop") records.push(rename(4, b, c));
+      if (scenario === "source-mismatch")
+        records[1] = rename(3, "/other/source.mkv", b);
+      if (scenario === "destination-mismatch")
+        records[1] = rename(3, a, "/other/dest.mkv");
+      if (scenario === "fork") records.push(rename(4, a, "/other/branch.mkv"));
+      if (scenario === "predecessors")
+        records.push(rename(4, "/other/source.mkv", b));
+      if (scenario === "cycle") records.push(rename(4, b, a));
+      if (scenario === "two-imports")
+        records.push({ ...imported, id: 4, data: { importedPath: b } });
+      if (scenario === "duplicate-import") records.push({ ...imported, id: 4 });
+      if (scenario === "unrelated")
+        records.push(
+          rename(4, "/unrelated/a.mkv", "/unrelated/b.mkv"),
+          rename(5, "/unrelated/b.mkv", "/unrelated/a.mkv"),
+          rename(6, undefined, "/unrelated/c.mkv"),
+        );
+      if (scenario === "missing-source") records[1] = rename(3, undefined, b);
+      if (scenario === "missing-destination")
+        records.push(rename(4, a, undefined));
+      if (scenario === "wrong-identity")
+        records[1] = { ...rename(3, a, b), movieId: 999, episodeId: 999 };
+      if (scenario === "unsafe") records[1] = rename(3, "/tv/../" + a, b);
+      if (scenario === "renamed-away") records.push(rename(4, b, c));
+      if (scenario === "hop-limit" || scenario === "hop-boundary") {
+        records.splice(1);
+        let previous = a;
+        for (let i = 0; i < (scenario === "hop-limit" ? 17 : 16); i++) {
+          const next =
+            i === (scenario === "hop-limit" ? 16 : 15) ? b : `/tv/hop-${i}.mkv`;
+          records.push(rename(i + 3, previous, next));
+          previous = next;
+        }
+      }
+      const transport = vi.fn<ArrTransport>(async (url) => {
+        const result = url.searchParams.has("downloadId")
+          ? scenario === "shared-download"
+            ? [grab, { ...grab, id: 99, episodeId: 999, movieId: 999 }]
+            : [grab, imported]
+          : records;
+        if (url.searchParams.has("downloadId")) {
+          expect(url.searchParams.get("downloadId")).toBe(imported.downloadId);
+          expect(
+            url.searchParams.has("episodeId") ||
+              url.searchParams.has("movieIds"),
+          ).toBe(false);
+        }
+        return { records: result, totalRecords: result.length };
+      });
+      const client =
+        source === "sonarr"
+          ? new SonarrClient("http://fixture.test", "fixture", transport)
+          : new RadarrClient("http://fixture.test", "fixture", transport);
+      if (
+        ["direct", "one-hop", "two-hop", "unrelated", "hop-boundary"].includes(
+          scenario,
+        )
+      )
+        expect(await correlateRelease(client, identity)).toMatchObject({
+          id: 2,
+          sourceTitle: imported.sourceTitle,
+        });
+      else
+        await expect(correlateRelease(client, identity)).rejects.toThrow(
+          scenario === "shared-download"
+            ? "multi-title download"
+            : "Ambiguous imported",
+        );
+    });
+  }
+});

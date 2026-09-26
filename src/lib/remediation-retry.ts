@@ -78,7 +78,17 @@ export function preMutationRetryProof(
     return false;
   if (
     !steps.some(({ step }) => step === "pre-mutation-failure") &&
-    !legacyHistoryParseFailure(operation.error)
+    !legacyHistoryParseFailure(operation.error) &&
+    // v0.2.6 checked this configuration before correlation or reservation.
+    // The exact signature is only evidence together with ALL database checks
+    // below. An authorized retry may add retry-authorized, never mutation intent.
+    !(
+      operation.error ===
+        "Disable Arr automatic failed-download redownload before using Automatic mode" &&
+      operation.release_key === null &&
+      operation.quarantine_id === null &&
+      steps.every(({ step }) => step === "retry-authorized")
+    )
   )
     return false;
   try {
