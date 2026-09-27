@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.9
+
+- Redesign Manual Fix & Redownload around one explicitly selected file, preserving one-at-a-time Manual admission and non-destructive ordinary scans.
+- Revalidate exact current Arr/file identity and perform a fresh scan with current fingerprints and Arr-primary language evidence before destructive work. Old fingerprint versions cannot authorize mutation; stale evidence is refreshed, and PASS or needs-analysis stops without mutation.
+- Preserve an exclusive, independent quarantine recovery COPY before deletion, never a hardlink. Copy the complete file, fsync output, require matching source/readback SHA-256 and size, and revalidate source identity before Arr deletion.
+- Ask Sonarr to DELETE its exact episodeFile ID and Radarr to DELETE its exact movieFile ID. Verify the old Arr file ID and library path are absent and the mapped active pathname is gone; Media Guard no longer unlinks active media or requests reconciliation rescans for Fix & Redownload.
+- Preserve exact imported/grabbed release correlation, rename-chain handling, shared-download refusal, and failed-history/blocklist safeguards. Corroborate blocklist creation before dispatching exactly one EpisodeSearch or MoviesSearch and record its command ID.
+- Require a fresh scan and configured-language PASS for a different replacement file identity before completion. Wrong-language or unknown replacements never trigger an automatic remediation loop.
+- Safely supersede stale manually replaced operations only after fresh current-file evidence and live Arr reads prove the old exact identity is absent. Preserve historical evidence and retry/release reservations.
+- Reconcile the exact legacy v0.2.8 pre-quarantine fingerprint-validation failure only with its known two-step journal, null quarantine ID, no associated quarantine records, and a freshly verified different current file. Incomplete or conflicting proof remains blocked; the old operation is never retried.
+- Preserve pre-dispatch intent journaling and fail-closed handling of uncertain external outcomes. Retain the quarantine backup until explicit cleanup revalidates the verified replacement and recovery copy.
+
 ## 0.2.8
 
 - Support Sonarr episodeFileRenamed and Radarr movieFileRenamed history when correlating imported releases.
