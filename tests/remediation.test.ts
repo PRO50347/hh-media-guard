@@ -18,8 +18,11 @@ import {
   writeFile,
   rename,
   symlink,
+  readdir,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
+import { createHash } from "node:crypto";
+import * as scannerModule from "../src/lib/scanner";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { SafeError } from "../src/lib/safe-error";
@@ -34,6 +37,7 @@ import {
 } from "../src/lib/remediation";
 import {
   addMapping,
+  getSettings,
   saveSettings,
   saveScan,
   raw,
@@ -1211,4 +1215,266 @@ it("source identity is revalidated after backup and before Arr DELETE", async ()
   expect(
     await readFile(quarantine(op.quarantine_id!)!.quarantine_path),
   ).toEqual(await readFile(data.scan.path + ".old"));
+});
+
+async function legacyFingerprintOperation() {
+  const data = await fixture();
+  const info = await lstat(data.scan.path),
+    settings = getSettings();
+  const fingerprintV2 = createHash("sha256")
+    .update(
+      JSON.stringify([
+        data.scan.path,
+        info.size,
+        info.mtimeMs,
+        "",
+        [
+          settings.requiredLanguages,
+          settings.allowDescriptive,
+          settings.requireMainProgram,
+        ],
+        2,
+      ]),
+    )
+    .digest("hex");
+  expect(fingerprintV2).not.toBe(data.scan.fingerprint);
+  const scan = { ...data.scan, fingerprint: fingerprintV2 };
+  saveScan(scan);
+  const id = `legacy-fingerprint-${data.identity.fileId}`;
+  const releaseKey = `reserved-${id}`;
+  reserveReplacement(
+    `${data.identity.source}:${data.identity.entityId}`,
+    releaseKey,
+  );
+  raw()
+    .prepare(
+      `INSERT INTO operations(id,operation_key,source,entity_id,file_id,state,evidence,release_key,error,created_at,updated_at)
+    VALUES(?,?,?,?,?,'needs-attention',?,?,?,'legacy','legacy')`,
+    )
+    .run(
+      id,
+      id,
+      data.identity.source,
+      data.identity.entityId,
+      data.identity.fileId,
+      JSON.stringify({ scan, identity: data.identity }),
+      releaseKey,
+      "Media or policy changed since scanning",
+    );
+  for (const step of ["mutation-started", "quarantine-intent"])
+    raw()
+      .prepare(
+        "INSERT INTO operation_steps(operation_id,step,result,created_at) VALUES(?,?,?,?)",
+      )
+      .run(id, step, "{}", "legacy");
+  return { ...data, op: operation(data.identity.fileId) };
+}
+describe("legacy pre-quarantine fingerprint failure reconciliation", () => {
+  it("supersedes the exact reserved v2 failure after a fresh different FAIL without mutations or erasing evidence", async () => {
+    const data = await legacyFingerprintOperation();
+    expect(() => requireManualAdmission()).toThrow();
+    const priorSteps = raw()
+      .prepare("SELECT * FROM operation_steps WHERE operation_id=? ORDER BY id")
+      .all(data.op.id);
+    const reservations = [
+      raw().prepare("SELECT * FROM retry_titles").all(),
+      raw().prepare("SELECT * FROM retry_releases").all(),
+    ];
+    const next = await replacement(data, "spa");
+    const before = await readFile(next.scan.path),
+      stat = await lstat(next.scan.path),
+      copies = await readdir(destination);
+    const scan = vi.spyOn(scannerModule, "scanFile");
+    const client = next.client as SonarrClient;
+    const deletes = vi.spyOn(client, "deleteEpisodeFile"),
+      blocks = vi.spyOn(client, "markHistoryFailed"),
+      searches = vi.spyOn(client, "searchEpisode");
+    await verifyReplacement(next.scan, next.identity, client);
+    expect(scan).toHaveBeenCalledOnce();
+    expect(scan).toHaveBeenCalledWith(
+      next.scan.path,
+      undefined,
+      expect.objectContaining({
+        fileId: next.identity.fileId,
+        languages: ["Spanish"],
+      }),
+    );
+    expect(operation(data.identity.fileId)).toMatchObject({
+      ...data.op,
+      state: "superseded",
+      updated_at: expect.any(String),
+    });
+    expect(
+      raw()
+        .prepare(
+          "SELECT * FROM operation_steps WHERE operation_id=? ORDER BY id",
+        )
+        .all(data.op.id)
+        .slice(0, 2),
+    ).toEqual(priorSteps);
+    expect(
+      JSON.parse(
+        (
+          raw()
+            .prepare(
+              "SELECT result FROM operation_steps WHERE operation_id=? AND step='superseded'",
+            )
+            .get(data.op.id) as { result: string }
+        ).result,
+      ).reason,
+    ).toBe(
+      "Legacy pre-quarantine fingerprint validation failure; media subsequently changed outside Media Guard",
+    );
+    expect([
+      raw().prepare("SELECT * FROM retry_titles").all(),
+      raw().prepare("SELECT * FROM retry_releases").all(),
+    ]).toEqual(reservations);
+    expect(() => requireManualAdmission()).not.toThrow();
+    expect(manualRemediationControl(next.mediaId)).toMatchObject({
+      eligible: true,
+      retryOperationId: undefined,
+    });
+    await expect(
+      queuePreMutationRetry(next.mediaId, data.op.id, "fixture-admin"),
+    ).rejects.toThrow();
+    expect(deletes).not.toHaveBeenCalled();
+    expect(blocks).not.toHaveBeenCalled();
+    expect(searches).not.toHaveBeenCalled();
+    expect(await readFile(next.scan.path)).toEqual(before);
+    expect(await lstat(next.scan.path)).toMatchObject({
+      dev: stat.dev,
+      ino: stat.ino,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+    });
+    expect(await readdir(destination)).toEqual(copies);
+    expect(raw().prepare("SELECT count(*) n FROM quarantines").get()).toEqual({
+      n: 0,
+    });
+  });
+  it.each([
+    "same-file",
+    "old-file-present",
+    "quarantine-path",
+    "quarantine-fingerprint",
+    "quarantine-operation",
+    "quarantine-id",
+    "different-error",
+    "wrong-state",
+    "quarantine",
+    "backup-copy-intent",
+    "backup-copy",
+    "arr-delete-intent",
+    "arr-delete-verified",
+    "rescan-command-intent",
+    "rescan-command",
+    "history-failed-intent",
+    "history-failed",
+    "blocklist-verified",
+    "replacement-search-intent",
+    "replacement-search",
+    "cleanup-intent",
+    "cleanup-complete",
+    "unknown-step",
+    "missing-step",
+    "missing-quarantine-intent",
+    "duplicate-step",
+    "uncertain-read",
+    "invalid-current-identity",
+  ])("remains blocked for %s", async (blocker) => {
+    const data = await legacyFingerprintOperation();
+    if (blocker.startsWith("quarantine-") && blocker !== "quarantine-id") {
+      const oldScan = JSON.parse(data.op.evidence).scan;
+      raw()
+        .prepare("INSERT INTO quarantines VALUES(?,?,?,?,?,?,?)")
+        .run(
+          `copy-${data.op.id}`,
+          blocker === "quarantine-path" ? oldScan.path : "/unrelated",
+          "/unused",
+          JSON.stringify(
+            blocker === "quarantine-fingerprint"
+              ? { scan: { fingerprint: oldScan.fingerprint } }
+              : blocker === "quarantine-operation"
+                ? { operationId: data.op.id }
+                : {},
+          ),
+          "needs-attention",
+          "legacy",
+          null,
+        );
+    } else if (blocker === "quarantine-id")
+      raw()
+        .prepare("UPDATE operations SET quarantine_id='copy' WHERE id=?")
+        .run(data.op.id);
+    else if (blocker === "different-error")
+      raw()
+        .prepare("UPDATE operations SET error=error || '.' WHERE id=?")
+        .run(data.op.id);
+    else if (blocker === "wrong-state")
+      raw()
+        .prepare("UPDATE operations SET state='pending' WHERE id=?")
+        .run(data.op.id);
+    else if (blocker === "missing-quarantine-intent")
+      raw()
+        .prepare(
+          "DELETE FROM operation_steps WHERE operation_id=? AND step='quarantine-intent'",
+        )
+        .run(data.op.id);
+    else if (blocker === "missing-step")
+      raw()
+        .prepare(
+          "DELETE FROM operation_steps WHERE operation_id=? AND step='mutation-started'",
+        )
+        .run(data.op.id);
+    else if (
+      ![
+        "same-file",
+        "old-file-present",
+        "uncertain-read",
+        "invalid-current-identity",
+      ].includes(blocker)
+    )
+      raw()
+        .prepare(
+          "INSERT INTO operation_steps(operation_id,step,result,created_at) VALUES(?,?,?,?)",
+        )
+        .run(
+          data.op.id,
+          blocker === "duplicate-step" ? "quarantine-intent" : blocker,
+          "{}",
+          "legacy",
+        );
+    const unchanged = operation(data.identity.fileId);
+    if (blocker === "same-file") {
+      const { client } = wire(data);
+      await verifyReplacement(data.scan, data.identity, client);
+    } else {
+      const next = await replacement(data, "spa"),
+        client = next.client as SonarrClient;
+      const read = client.findEpisodeFile.bind(client);
+      vi.spyOn(client, "findEpisodeFile").mockImplementation(async (id) => {
+        if (id === data.identity.fileId && blocker === "old-file-present")
+          return {
+            id,
+            path: data.identity.arrPath,
+            seriesId: data.identity.seriesId,
+          };
+        if (id === data.identity.fileId && blocker === "uncertain-read")
+          throw new Error("Unknown Arr read outcome");
+        if (
+          id === next.identity.fileId &&
+          blocker === "invalid-current-identity"
+        )
+          return undefined;
+        return read(id);
+      });
+      const pending = verifyReplacement(next.scan, next.identity, client);
+      if (["uncertain-read", "invalid-current-identity"].includes(blocker))
+        await expect(pending).rejects.toThrow();
+      else await pending;
+    }
+    expect(operation(data.identity.fileId)).toEqual(unchanged);
+    expect(markers(data.op.id)).not.toContain("superseded");
+    expect(() => requireManualAdmission()).toThrow();
+  });
 });
