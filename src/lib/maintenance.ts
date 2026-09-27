@@ -30,7 +30,7 @@ export function maintenance(now = Date.now()) {
 export function recoverOperations() {
   const operations = raw()
     .prepare(
-      "SELECT id FROM operations WHERE state NOT IN ('pending','complete','needs-attention')",
+      "SELECT id FROM operations WHERE state NOT IN ('pending','complete','needs-attention','superseded','no-fix-needed')",
     )
     .all() as { id: string }[];
   for (const operation of operations) {

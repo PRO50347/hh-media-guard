@@ -217,6 +217,15 @@ export class ArrClient {
       "blocklist",
     );
   }
+  protected async optionalFile(endpoint: string) {
+    try {
+      return fileSchema.parse(await this.request(endpoint));
+    } catch (error) {
+      if (error instanceof SafeError && error.code === "arr.http.404")
+        return undefined;
+      throw error;
+    }
+  }
   async queue() {
     return this.request("/queue?pageSize=100");
   }
@@ -271,6 +280,9 @@ export class SonarrClient extends ArrClient {
       await this.request(`/episodefile/${id.parse(fileId)}`),
     );
   }
+  async findEpisodeFile(fileId: number) {
+    return this.optionalFile(`/episodefile/${id.parse(fileId)}`);
+  }
   async deleteEpisodeFile(fileId: number) {
     return this.request(`/episodefile/${id.parse(fileId)}`, "DELETE");
   }
@@ -303,6 +315,9 @@ export class RadarrClient extends ArrClient {
     return fileSchema.parse(
       await this.request(`/moviefile/${id.parse(fileId)}`),
     );
+  }
+  async findMovieFile(fileId: number) {
+    return this.optionalFile(`/moviefile/${id.parse(fileId)}`);
   }
   async deleteMovieFile(fileId: number) {
     return this.request(`/moviefile/${id.parse(fileId)}`, "DELETE");

@@ -127,6 +127,12 @@ it("100 failures: audits, schedules, webhooks and rescan actions cannot remediat
       const endpoint = url.pathname.replace("/api/v3", "");
       if (endpoint === "/system/status")
         return { appName: "Radarr", version: "6.4.4.10685" };
+      if (endpoint.startsWith("/moviefile/"))
+        return files[Number(endpoint.split("/").pop()) - 1];
+      if (endpoint === "/moviefile")
+        return files.filter(
+          (file) => file.movieId === Number(url.searchParams.get("movieId")),
+        );
       if (endpoint === "/movie") return movies;
       if (endpoint.startsWith("/movie/"))
         return movies[Number(endpoint.split("/").pop()) - 1];

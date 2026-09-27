@@ -8,7 +8,7 @@ export default async function Quarantine() {
   const items = raw()
     .prepare(
       `SELECT q.*, EXISTS(SELECT 1 FROM operations o JOIN operation_steps s ON s.operation_id=o.id
-      WHERE o.quarantine_id=q.id AND o.state='complete' AND s.step='verified-replacement'
+      WHERE o.quarantine_id=q.id AND o.state IN ('complete','superseded') AND s.step='verified-replacement'
         AND json_type(q.evidence,'$.retainedIdentity')='object') AS cleanup_ready
       FROM quarantines q ORDER BY q.created_at DESC LIMIT 500`,
     )

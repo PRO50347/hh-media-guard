@@ -77,9 +77,7 @@ describe("Fix & Redownload controls", () => {
     confirm.mockReturnValue(true);
     await button.props.onClick();
     expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "quarantined and removed from the active media path",
-      ),
+      expect.stringContaining("Sonarr/Radarr will delete their exact file"),
     );
     expect(mocks.api).toHaveBeenCalledWith("/api/jobs", {
       method: "POST",
@@ -104,7 +102,7 @@ describe("Fix & Redownload controls", () => {
     expect(html).toContain('aria-describedby="remediation-description"');
   });
   it.each([
-    ["queued", "Fixing"],
+    ["queued", "Checking current file..."],
     ["quarantining", "Fixing"],
     ["pending", "Replacement pending"],
     ["needs-attention", "Needs attention"],
@@ -117,7 +115,9 @@ describe("Fix & Redownload controls", () => {
       eligible: false,
       state: remediationState(state),
     });
-    expect(html).toContain(`aria-label="Remediation state">${label}`);
+    expect(html).toContain(
+      `aria-label="Remediation state">${label === "Needs attention" ? "Fix unavailable — review operation" : label}`,
+    );
     expect(html).not.toContain("Fix &amp; Redownload");
   });
   it("offers quarantine cleanup only after verified replacement and requires separate confirmation", async () => {
@@ -233,4 +233,15 @@ it("distinguishes Manual Fix & Redownload from automatic scan remediation in set
     }),
   );
   expect(automatic).toContain("every eligible failure");
+});
+it.each([
+  "Checking current file...",
+  "No fix needed — file now passes",
+  "Fresh scan needs analysis",
+  "Old attempt superseded — current file can be fixed normally",
+] as const)("keeps the action area visible for %s", (state) => {
+  const eligible = state.startsWith("Old attempt");
+  const html = render({ ...ready, state, eligible });
+  expect(html).toContain(state);
+  if (eligible) expect(html).toContain("Fix &amp; Redownload");
 });

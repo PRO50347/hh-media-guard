@@ -1,3 +1,6 @@
+import { freshRemediationScan } from "./remediation-preflight";
+import { clientFor } from "./remediation";
+import { sameIdentity } from "./remediation-retry";
 import { remediationReason } from "./remediation-errors";
 import { loadManualRemediation } from "./manual-remediation";
 import { requireRemediationAllowed } from "./remediation";
@@ -43,7 +46,7 @@ async function applyPolicy(
   requireJobOwnership: () => void,
 ) {
   requireJobOwnership();
-  if (identity) await verifyReplacement(scan, identity);
+  if (identity && (await verifyReplacement(scan, identity))) return;
   if (
     scan.decision !== "fail" ||
     !["quarantine", "automatic"].includes(getSettings().safetyMode)
@@ -132,33 +135,11 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
       owns(job, signal);
       requireRemediationAllowed();
       const { scan, identity } = loadManualRemediation(payload.mediaId);
-      if (
-        scan.fingerprint !== payload.fingerprint ||
-        (
-          [
-            "source",
-            "entityId",
-            "fileId",
-            "seriesId",
-            "arrPath",
-            "downloadId",
-          ] as const
-        ).some((key) => identity[key] !== payload.identity[key])
-      )
+      if (!sameIdentity(identity, payload.identity))
         throw new Error(
           "Media identity or evidence changed after the request. Rescan first.",
         );
-      if (
-        payload.retry &&
-        ((await safeMediaPath(scan.path, roots())) !== scan.path ||
-          (await fingerprint(scan.path, getSettings())) !== scan.fingerprint)
-      )
-        throw new Error("Media or policy changed since scanning");
-      jobQueue.progress(
-        job,
-        10,
-        "Fixing: validating and quarantining failed media",
-      );
+      jobQueue.progress(job, 10, "Checking current file...");
       const result = await remediate(
         scan,
         identity,
@@ -169,12 +150,22 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
         job,
       );
       owns(job, signal);
+      const message =
+        result === "no-fix-needed"
+          ? "File now passes; no replacement needed."
+          : result === "fresh-needs-analysis"
+            ? "Fresh scan needs analysis."
+            : result === "pending"
+              ? "Replacement pending"
+              : result === "needs-attention"
+                ? "Fix unavailable — review operation"
+                : "Operation already recorded";
+      jobQueue.progress(job, 100, message);
       jobQueue.finish(
         job,
-        result === "needs-attention" ? "needs-attention" : "completed",
-        result === "needs-attention"
-          ? "Remediation requires attention; inspect the operation evidence"
-          : undefined,
+        ["needs-attention", "fresh-needs-analysis"].includes(result)
+          ? "needs-attention"
+          : "completed",
       );
     } catch (error) {
       if (signal.aborted) throw error;
@@ -228,7 +219,21 @@ export async function executeJob(job: LeasedJob, signal: AbortSignal) {
   jobQueue.counts(job, 1, 0);
   jobQueue.progress(job, 10, input);
   try {
-    const scan = await inspect(input, signal, payload.force);
+    const scan =
+      payload.source && payload.entityId && payload.fileId && payload.arrPath
+        ? await freshRemediationScan(
+            {
+              source: payload.source,
+              entityId: payload.entityId,
+              fileId: payload.fileId,
+              seriesId: payload.seriesId,
+              arrPath: payload.arrPath,
+              downloadId: payload.downloadId,
+            },
+            clientFor(payload.source),
+            signal,
+          )
+        : await inspect(input, signal, payload.force);
     owns(job, signal);
     saveScan(scan);
     raw()

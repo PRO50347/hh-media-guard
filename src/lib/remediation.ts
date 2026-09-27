@@ -1,3 +1,9 @@
+import { reconcileRemediation } from "./remediation-reconcile";
+import {
+  freshRemediationScan,
+  exactCurrentFile,
+  verifyArrDeletion,
+} from "./remediation-preflight";
 import { correlateRelease, corroborateBlocklist } from "./remediation-history";
 import { requireManualAdmission } from "./remediation-admission";
 import type { LeasedJob } from "./job-queue";
@@ -14,7 +20,11 @@ import {
   roots,
 } from "./store";
 import { decryptSecret } from "./crypto";
-import { moveToQuarantine } from "./quarantine";
+import {
+  preserveRecoveryCopy,
+  verifyRecoveryCopy,
+  quarantineRoot,
+} from "./quarantine";
 import { decideAudio } from "./rules";
 import { translateArrPath } from "./library";
 import { reserveReplacement } from "./retries";
@@ -46,7 +56,7 @@ export function requireRemediationAllowed() {
   )
     throw new Error("Remediation is disabled");
 }
-function clientFor(source: "sonarr" | "radarr"): Client {
+export function clientFor(source: "sonarr" | "radarr"): Client {
   const config = integration(source);
   const key = integrationKey(source);
   if (!config.enabled || !config.url || !key)
@@ -97,7 +107,6 @@ export async function remediate(
       const payload = job && JSON.parse(job.payload);
       if (
         !payload ||
-        payload.fingerprint !== scan.fingerprint ||
         !sameIdentity(payload.identity, identity) ||
         !payload.mediaId
       )
@@ -115,6 +124,27 @@ export async function remediate(
       .immediate();
   if (scan.decision !== "fail" || !scan.fingerprint)
     throw new Error("Conclusive failed evidence required");
+  const client = provided || clientFor(identity.source);
+  scan = await freshRemediationScan(identity, client, signal);
+  authorize();
+  if (scan.decision !== "fail") {
+    if (retry) {
+      const prior = raw()
+        .prepare("SELECT * FROM operations WHERE id=?")
+        .get(retry.operationId) as RetryOperation;
+      if (!prior || !preMutationRetryProof(prior, "retry-queued"))
+        throw new Error(
+          "Pre-mutation retry proof is no longer valid; manual inspection required",
+        );
+      state(
+        prior.id,
+        scan.decision === "pass" ? "no-fix-needed" : "needs-attention",
+      );
+    }
+    if (scan.decision === "needs-analysis")
+      needsAttention(scan.path, "unknown language", scan);
+    return scan.decision === "pass" ? "no-fix-needed" : "fresh-needs-analysis";
+  }
   const key = createHash("sha256")
     .update(
       JSON.stringify([
@@ -144,9 +174,15 @@ export async function remediate(
           now,
         ).changes;
   if (!created) {
-    const existing = raw()
-      .prepare("SELECT * FROM operations WHERE operation_key=?")
-      .get(key) as RetryOperation;
+    const existing = (
+      retry
+        ? raw()
+            .prepare("SELECT * FROM operations WHERE id=?")
+            .get(retry.operationId)
+        : raw()
+            .prepare("SELECT * FROM operations WHERE operation_key=?")
+            .get(key)
+    ) as RetryOperation;
     if (!existing)
       throw new Error("Retry does not match the original operation");
     if (!retry)
@@ -183,7 +219,6 @@ export async function remediate(
   }
   let mutationStarted = false;
   try {
-    const client = provided || clientFor(identity.source);
     const episodeIds = await validateRemediationIdentity(
       scan,
       identity,
@@ -200,6 +235,7 @@ export async function remediate(
       identity.source === "sonarr"
         ? { seriesId: identity.seriesId! }
         : { movieId: identity.entityId };
+    await quarantineRoot();
     const blocklistBefore = await client.blocklist(blocklistScope);
     const releaseKey = createHash("sha256")
       .update(
@@ -216,7 +252,7 @@ export async function remediate(
     // Durable intent precedes even reservation, so a crash can never make a
     // partially dispatched operation appear safe to replay.
     mutationStarted = true;
-    step(id, "mutation-started", {});
+    step(id, "mutation-started", { scan, identity });
     reserveReplacement(
       `${identity.source}:${identity.entityId}`,
       releaseKey,
@@ -226,54 +262,36 @@ export async function remediate(
     raw()
       .prepare("UPDATE operations SET release_key=? WHERE id=?")
       .run(releaseKey, id);
-    state(id, "quarantining");
-    step(id, "quarantine-intent", {});
-    const quarantineId = await moveToQuarantine(scan, signal, authorize);
+    state(id, "backing-up");
+    step(id, "backup-copy-intent", {});
+    const quarantineId = await preserveRecoveryCopy(scan, signal, authorize);
     raw()
       .prepare("UPDATE operations SET quarantine_id=? WHERE id=?")
       .run(quarantineId, id);
-    step(id, "quarantine", { quarantineId });
+    step(id, "backup-copy", { quarantineId });
     authorize();
-    state(id, "rescanning");
-    // Ask Arr to reconcile missing media, rather than DELETE a pathname that an
-    // independent importer might concurrently replace.
-    step(id, "rescan-command-intent", {});
-    const command = z
-      .object({ id: z.number().int().positive() })
-      .parse(
-        await client.command(
-          identity.source === "sonarr" ? "RescanSeries" : "RescanMovie",
-          identity.source === "sonarr"
-            ? { seriesId: identity.seriesId }
-            : { movieId: identity.entityId },
-        ),
-      );
-    step(id, "rescan-command", { id: command.id });
-    let complete = false;
-    for (let attempt = 0; attempt < 30; attempt++) {
-      signal.throwIfAborted();
-      const result = await client.commandStatus(command.id);
-      if (result.id !== command.id)
-        throw new Error("Arr command identity is inconsistent");
-      if (result.status === "completed") {
-        complete = true;
-        break;
-      }
-      if (["failed", "aborted", "cancelled"].includes(result.status))
-        throw new Error("Arr rescan failed");
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-    if (!complete) throw new Error("Arr rescan timed out");
-    const remaining =
-      client instanceof SonarrClient
-        ? await client.episodeFiles(identity.seriesId!)
-        : await client.movieFiles(identity.entityId);
+    await validateRemediationIdentity(scan, identity, client);
     if (
-      remaining.some(
-        (file) => file.id === identity.fileId || file.path === identity.arrPath,
-      )
+      (await safeMediaPath(scan.path, roots())) !== scan.path ||
+      (await fingerprint(scan.path, getSettings())) !== scan.fingerprint
     )
-      throw new Error("Arr still reports media at the original path");
+      throw new Error("Media or policy changed since scanning");
+    authorize();
+    await verifyRecoveryCopy(quarantineId);
+    authorize();
+    state(id, "deleting");
+    step(id, "arr-delete-intent", { fileId: identity.fileId });
+    try {
+      if (client instanceof SonarrClient)
+        await client.deleteEpisodeFile(identity.fileId);
+      else await client.deleteMovieFile(identity.fileId);
+    } catch {
+      throw new Error(
+        "Arr deletion outcome is uncertain; inspect the retained backup and Arr before proceeding",
+      );
+    }
+    await verifyArrDeletion(identity, client, scan.path);
+    step(id, "arr-delete-verified", { fileId: identity.fileId });
     authorize();
     if ((await client.downloadHandling()).autoRedownloadFailed)
       throw new Error("Arr redownload settings changed");
@@ -332,43 +350,28 @@ export async function verifyReplacement(
   identity: MediaIdentity,
   provided?: Client,
 ) {
-  if (scan.decision !== "pass") return;
+  // Persist the explicit-action boundary across subsequent scheduled scans too.
+  // A replacement that fails must never start an automatic replacement loop.
   if (
+    raw()
+      .prepare(
+        `SELECT 1 FROM operation_steps s JOIN operations o ON o.id=s.operation_id
+    WHERE o.source=? AND o.entity_id=? AND s.step IN ('superseded','verified-replacement')
+    AND json_extract(s.result,'$.identity.fileId')=? LIMIT 1`,
+      )
+      .get(identity.source, identity.entityId, identity.fileId)
+  )
+    return true;
+  if (
+    !scan.fingerprint ||
     !raw()
       .prepare(
-        "SELECT 1 FROM operations WHERE source=? AND entity_id=? AND state='pending'",
+        "SELECT 1 FROM operations WHERE source=? AND entity_id=? AND file_id<>? AND state NOT IN ('complete','superseded','no-fix-needed') LIMIT 1",
       )
-      .get(identity.source, identity.entityId)
+      .get(identity.source, identity.entityId, identity.fileId)
   )
-    return;
-  await validateReplacementEvidence(scan, identity, provided);
-  requireRuntimeOwnership();
-  const pending = raw()
-    .prepare(
-      "SELECT id FROM operations WHERE source=? AND entity_id=? AND file_id<>? AND state='pending'",
-    )
-    .all(identity.source, identity.entityId, identity.fileId) as {
-    id: string;
-  }[];
-  raw()
-    .transaction(() => {
-      for (const operation of pending) {
-        step(operation.id, "verified-replacement", { scan, identity });
-        state(operation.id, "complete");
-      }
-      if (pending.length) {
-        raw()
-          .prepare(
-            "UPDATE media_items SET action_state='none' WHERE source=? AND arr_id=?",
-          )
-          .run(identity.source, identity.entityId);
-        audit(
-          "replacement",
-          `Verified replacement for ${identity.source}:${identity.entityId}`,
-        );
-      }
-    })
-    .immediate();
+    return false;
+  return reconcileRemediation(identity, provided || clientFor(identity.source));
 }
 
 /** Recheck a persisted PASS and the current Arr file before allowing cleanup. */
@@ -458,18 +461,8 @@ export async function validateRemediationIdentity(
 ) {
   requireRemediationAllowed();
   const client = provided || clientFor(identity.source);
-  const current =
-    client instanceof SonarrClient
-      ? await client.episodeFile(identity.fileId)
-      : await client.movieFile(identity.fileId);
-  if (
-    current.id !== identity.fileId ||
-    current.path !== identity.arrPath ||
-    translateArrPath(identity.source, current.path) !== scan.path ||
-    (identity.source === "sonarr"
-      ? current.seriesId !== identity.seriesId
-      : current.movieId !== identity.entityId)
-  )
+  const current = await exactCurrentFile(identity, client);
+  if (translateArrPath(identity.source, current.path) !== scan.path)
     throw new Error("Arr file identity does not match mapped evidence");
   const currentLanguages = {
     source: identity.source,

@@ -16,15 +16,26 @@ export function RemediationAction({
   const [message, setMessage] = useState("");
   const state =
     busy || (submitted && control?.state === "Ready")
-      ? "Fixing"
+      ? "Checking current file..."
       : control?.state;
-  if (!control || (!control.eligible && control.state === "Ready")) return null;
+  if (!control) return null;
   return (
     <div>
       {state !== "Ready" && (
         <p role="status" aria-label="Remediation state">
-          {state}
+          {state === "Needs attention"
+            ? "Fix unavailable — review operation"
+            : state}
         </p>
+      )}
+      {!control.eligible && state === "Ready" && (
+        <p className="muted">
+          Fix unavailable — a conclusive wrong-language result and exact Arr
+          identity are required.
+        </p>
+      )}
+      {!control.eligible && control.disabledReason && (
+        <p className="muted">{control.disabledReason}</p>
       )}
       {control.reason && <p className="muted">{control.reason}</p>}
       {control.eligible && (
@@ -42,7 +53,7 @@ export function RemediationAction({
                   (control.retryOperationId
                     ? "Retry the previously failed operation? The server will recheck that no mutation began, that the active file is unchanged, and that Arr identity still matches. "
                     : "") +
-                    "Fix & Redownload this file? The failed file will be quarantined and removed from the active media path. Sonarr/Radarr will reject the correlated release and search for a replacement. The quarantine copy is retained for recovery until a verified replacement and explicit cleanup.",
+                    "Fix & Redownload this file? The current file will be freshly checked and a recovery copy preserved. Sonarr/Radarr will delete their exact file, reject the correlated release, and search once for a replacement. The quarantine copy is retained for recovery until a verified replacement and explicit cleanup.",
                 )
               )
                 return;
@@ -74,7 +85,7 @@ export function RemediationAction({
           </button>
           <p id={descriptionId} className="muted">
             {control.disabledReason ||
-              "Quarantine this failed file and request a replacement through Sonarr/Radarr."}
+              "Freshly check this file, preserve a recovery copy, and ask Sonarr/Radarr to replace their exact file."}
           </p>
         </>
       )}
@@ -90,7 +101,9 @@ export function useRemediationRefresh(
   const router = useRouter();
   const active = controls.some(
     (control) =>
-      control?.state === "Fixing" || control?.state === "Replacement pending",
+      control?.state === "Checking current file..." ||
+      control?.state === "Fixing" ||
+      control?.state === "Replacement pending",
   );
   useEffect(() => {
     if (!active) return;

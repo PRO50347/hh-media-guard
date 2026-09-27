@@ -1,6 +1,13 @@
 import { legacyHistoryParseFailure } from "./remediation-retry";
 
 const reasons = new Set([
+  "Verified recovery copy is unavailable",
+  "Verified recovery copy changed",
+  "Current Arr file identity changed; rescan before fixing",
+  "Current media path is unsafe or unavailable",
+  "Arr deletion outcome is uncertain; inspect the retained backup and Arr before proceeding",
+  "Arr still reports the old file; inspection required",
+  "Active file still exists after Arr deletion; inspection required",
   "Manual remediation requires an explicitly authorized job",
   "Another remediation is active or requires inspection; only one item is allowed at a time",
   "Grabbed release lacks required blocklist evidence",

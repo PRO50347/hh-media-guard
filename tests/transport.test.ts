@@ -76,3 +76,59 @@ it("applies the same mixed-DNS SSRF protection to streamed library responses", a
   ).rejects.toThrow("prohibited");
   expect(mocks.request).not.toHaveBeenCalled();
 });
+it.each([204, 404, 500])(
+  "handles exact-file DELETE HTTP %s without parsing an empty success body or replaying",
+  async (statusCode) => {
+    mocks.lookup.mockResolvedValue([{ address: "192.168.1.20", family: 4 }]);
+    mocks.request.mockImplementation((_url, options, respond) => {
+      expect(options.method).toBe("DELETE");
+      const request = new EventEmitter() as EventEmitter & { end: () => void };
+      request.end = () => {
+        respond(
+          Object.assign(new EventEmitter(), {
+            statusCode,
+            on: function (event: string, callback: () => void) {
+              if (event === "end") queueMicrotask(callback);
+              return this;
+            },
+          }),
+        );
+        queueMicrotask(() => request.emit("close"));
+      };
+      return request;
+    });
+    const result = arrTransport(
+      new URL("http://fixture.test/api/v3/episodefile/42"),
+      "fixture-secret",
+      "DELETE",
+    );
+    if (statusCode === 204) await expect(result).resolves.toBeUndefined();
+    else
+      await expect(result).rejects.toMatchObject({
+        code: `arr.http.${statusCode}`,
+      });
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+  },
+);
+it("does not retry an uncertain DELETE network outcome", async () => {
+  mocks.lookup.mockResolvedValue([{ address: "192.168.1.20", family: 4 }]);
+  mocks.request.mockImplementation(() => {
+    const request = new EventEmitter() as EventEmitter & { end: () => void };
+    request.end = () => {
+      request.emit(
+        "error",
+        Object.assign(new Error("secret"), { code: "ECONNRESET" }),
+      );
+      request.emit("close");
+    };
+    return request;
+  });
+  await expect(
+    arrTransport(
+      new URL("http://fixture.test/api/v3/moviefile/42"),
+      "fixture-secret",
+      "DELETE",
+    ),
+  ).rejects.toMatchObject({ code: "arr.network" });
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+});

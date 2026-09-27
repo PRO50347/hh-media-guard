@@ -15,7 +15,9 @@ export function requireManualAdmission(exceptJob = "", exceptOperation = "") {
     )
     .get(exceptJob);
   const operations = raw()
-    .prepare("SELECT * FROM operations WHERE state<>'complete' AND id<>?")
+    .prepare(
+      "SELECT * FROM operations WHERE state NOT IN ('complete','superseded','no-fix-needed') AND id<>?",
+    )
     .all(exceptOperation) as RetryOperation[];
   if (job || operations.some((op) => !preMutationRetryProof(op)))
     throw new Error(

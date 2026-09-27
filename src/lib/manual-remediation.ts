@@ -1,7 +1,5 @@
 import { requireManualAdmission } from "./remediation-admission";
 import { randomUUID } from "node:crypto";
-import { fingerprint } from "./scanner";
-import { safeMediaPath } from "./security";
 import {
   preMutationRetryProof,
   sameIdentity,
@@ -9,20 +7,9 @@ import {
 } from "./remediation-retry";
 import { remediationReason } from "./remediation-errors";
 import { z } from "zod";
-import {
-  raw,
-  getSettings,
-  jobQueue,
-  audit,
-  roots,
-  listMappings,
-} from "./store";
+import { raw, getSettings, jobQueue, audit, listMappings } from "./store";
 import { translateArrPath } from "./library";
-import { decideAudio } from "./rules";
-import {
-  requireRemediationAllowed,
-  validateRemediationIdentity,
-} from "./remediation";
+import { requireRemediationAllowed } from "./remediation";
 import type { ScanResult } from "./types";
 import { remediationState, type RemediationControl } from "./remediation-ui";
 
@@ -53,6 +40,7 @@ type MediaRow = {
   fingerprint: string;
   decision: string;
   details: string;
+  title: string;
   scan_data: string | null;
 };
 const mediaSelect = `SELECT m.*, s.data AS scan_data FROM media_items m
@@ -66,15 +54,10 @@ function mediaRow(mediaId: string) {
 /** The browser supplies only a media ID. Neither scan evidence nor Arr identity
  * from a request can authorize remediation. Re-read this again in the worker. */
 export function loadManualRemediation(mediaId: string) {
-  return validatePersistedMedia(
-    mediaRow(mediaId),
-    getSettings(),
-    listMappings(),
-  );
+  return validatePersistedMedia(mediaRow(mediaId), listMappings());
 }
 function validatePersistedMedia(
   media: MediaRow | undefined,
-  settings: ReturnType<typeof getSettings>,
   mappings: ReturnType<typeof listMappings>,
 ) {
   if (!media || media.decision !== "fail" || !media.fingerprint)
@@ -104,12 +87,6 @@ function validatePersistedMedia(
         arr.arrPath !== identity.arrPath))
   )
     throw new Error("Failed evidence does not match exact Arr file identity.");
-  if (
-    decideAudio(scan.duration, scan.tracks, settings, arr).decision !== "fail"
-  )
-    throw new Error(
-      "Stored evidence is no longer a conclusive failure. Rescan first.",
-    );
   return { media, scan, identity };
 }
 
@@ -117,7 +94,7 @@ function operationFor(media: NonNullable<ReturnType<typeof mediaRow>>) {
   return raw()
     .prepare(
       `SELECT * FROM operations WHERE source=? AND entity_id=?
-    AND ((file_id=? AND json_extract(evidence,'$.scan.fingerprint')=?) OR state='pending'
+    AND state NOT IN ('superseded','no-fix-needed') AND ((file_id=? AND ? IS NOT NULL) OR state NOT IN ('complete','superseded','no-fix-needed')
       OR (state='complete' AND ?='pass')) ORDER BY created_at DESC, id DESC LIMIT 1`,
     )
     .get(
@@ -150,32 +127,39 @@ export function withRemediation<T extends { id: string }>(items: T[]) {
     .prepare(
       `SELECT o.*,m.id AS media_id FROM operations o JOIN media_items m
     ON o.source=m.source AND o.entity_id=m.arr_id WHERE m.id IN (${placeholders})
-    AND ((o.file_id=CAST(m.identity AS INTEGER) AND json_extract(o.evidence,'$.scan.fingerprint')=m.fingerprint)
-      OR o.state='pending' OR (o.state='complete' AND m.decision='pass'))
+    AND ((o.file_id=CAST(m.identity AS INTEGER))
+      OR o.state<>'complete' OR (o.state='complete' AND m.decision='pass'))
     ORDER BY o.created_at DESC,o.id DESC`,
     )
     .all(...ids) as (RetryOperation & { media_id: string })[];
   const jobs = raw()
     .prepare(
-      `SELECT j.state,m.id AS media_id FROM jobs j JOIN media_items m
-    ON json_extract(j.payload,'$.mediaId')=m.id AND json_extract(j.payload,'$.fingerprint')=m.fingerprint
+      `SELECT j.state,j.current_item,j.error,m.id AS media_id FROM jobs j JOIN media_items m
+    ON json_extract(j.payload,'$.mediaId')=m.id AND json_extract(j.payload,'$.identity.fileId')=CAST(m.identity AS INTEGER)
     WHERE j.kind='remediate' AND m.id IN (${placeholders}) ORDER BY j.created_at DESC,j.id DESC`,
     )
-    .all(...ids) as { media_id: string; state: string }[];
-  const settings = getSettings();
+    .all(...ids) as {
+    media_id: string;
+    state: string;
+    current_item?: string;
+    error?: string;
+  }[];
   const mappings = listMappings();
   const disabled = remediationDisabledReason();
   return items.map((item) => {
-    const operation = operations.find((op) => op.media_id === item.id);
+    const operation = operations.find(
+      (op) =>
+        op.media_id === item.id &&
+        !["superseded", "no-fix-needed"].includes(op.state),
+    );
+    const superseded = operations.some(
+      (op) => op.media_id === item.id && op.state === "superseded",
+    );
     const job = jobs.find((row) => row.media_id === item.id);
     let eligible = false;
     let retryOperationId: string | undefined;
     try {
-      const validated = validatePersistedMedia(
-        media.get(item.id),
-        settings,
-        mappings,
-      );
+      const validated = validatePersistedMedia(media.get(item.id), mappings);
       eligible = true;
       if (
         operation &&
@@ -186,8 +170,6 @@ export function withRemediation<T extends { id: string }>(items: T[]) {
             ["queued", "running", "retrying"].includes(row.state),
         ) &&
         preMutationRetryProof(operation) &&
-        JSON.parse(operation.evidence).scan.fingerprint ===
-          validated.scan.fingerprint &&
         sameIdentity(
           JSON.parse(operation.evidence).identity,
           validated.identity,
@@ -201,15 +183,32 @@ export function withRemediation<T extends { id: string }>(items: T[]) {
       ...item,
       remediation: {
         mediaId: item.id,
-        eligible: eligible && (!operation || !!retryOperationId),
-        state: remediationState(operation?.state || job?.state),
+        eligible:
+          eligible &&
+          (!operation || !!retryOperationId) &&
+          !["queued", "running", "retrying"].includes(job?.state || ""),
+        state: operation
+          ? remediationState(operation.state)
+          : job?.current_item === "File now passes; no replacement needed."
+            ? "No fix needed — file now passes"
+            : job?.current_item === "Fresh scan needs analysis."
+              ? "Fresh scan needs analysis"
+              : superseded
+                ? "Old attempt superseded — current file can be fixed normally"
+                : media.get(item.id)?.decision === "pass"
+                  ? "No fix needed — file now passes"
+                  : remediationState(job?.state),
         retryOperationId,
         reason: operation?.error
           ? remediationReason(operation.error, operation.source)
-          : undefined,
+          : job?.error
+            ? remediationReason(job.error)
+            : undefined,
         disabledReason:
           disabled ||
-          ((operation || job) && !retryOperationId
+          ((operation ||
+            (job && ["queued", "running", "retrying"].includes(job.state))) &&
+          !retryOperationId
             ? "An operation already exists for this evidence. Review its state in Jobs or Needs Attention; uncertain operations are never repeated."
             : undefined),
       },
@@ -222,7 +221,7 @@ export function attentionRemediation(subject: string) {
     .prepare(
       `SELECT id FROM media_items WHERE id=? OR path=?
       UNION SELECT m.id FROM media_items m JOIN operations o ON o.source=m.source AND o.entity_id=m.arr_id
-        AND o.file_id=CAST(m.identity AS INTEGER) WHERE o.id=? LIMIT 2`,
+        AND (o.file_id=CAST(m.identity AS INTEGER) OR o.state='superseded') WHERE o.id=? LIMIT 2`,
     )
     .all(subject, subject, subject) as { id: string }[];
   return rows.length === 1 ? manualRemediationControl(rows[0].id) : undefined;
@@ -235,10 +234,15 @@ export function queueManualRemediation(mediaId: string, actor: string) {
       const { media, scan, identity } = loadManualRemediation(mediaId);
       const operation = operationFor(media);
       if (operation) return { state: remediationState(operation.state) };
-      const payload = { mediaId, fingerprint: scan.fingerprint!, identity };
+      const payload = {
+        mediaId,
+        fingerprint: scan.fingerprint!,
+        identity,
+        title: media.title,
+      };
       const existing = raw()
         .prepare(
-          "SELECT id,state FROM jobs WHERE kind='remediate' AND json_extract(payload,'$.mediaId')=? AND json_extract(payload,'$.fingerprint')=? ORDER BY created_at DESC, id DESC LIMIT 1",
+          "SELECT id,state FROM jobs WHERE kind='remediate' AND json_extract(payload,'$.mediaId')=? AND json_extract(payload,'$.fingerprint')=? AND state IN ('queued','running','retrying') ORDER BY created_at DESC, id DESC LIMIT 1",
         )
         .get(mediaId, scan.fingerprint) as
         | { id: string; state: string }
@@ -271,11 +275,7 @@ export async function queuePreMutationRetry(
     .get(operationId) as RetryOperation | undefined;
   if (!operation) throw new Error("Operation not found");
   const prior = JSON.parse(operation.evidence);
-  if (
-    prior.scan.fingerprint !== scan.fingerprint ||
-    prior.scan.path !== scan.path ||
-    !sameIdentity(prior.identity, identity)
-  )
+  if (prior.scan.path !== scan.path || !sameIdentity(prior.identity, identity))
     throw new Error(
       "Retry identity or evidence changed; manual inspection required",
     );
@@ -292,14 +292,6 @@ export async function queuePreMutationRetry(
     throw new Error(
       "Operation is not proven pre-mutation; manual inspection required",
     );
-  if (
-    (await safeMediaPath(scan.path, roots())) !== scan.path ||
-    (await fingerprint(scan.path, getSettings())) !== scan.fingerprint
-  )
-    throw new Error("Media or policy changed since scanning");
-  await validateRemediationIdentity(scan, identity);
-  if ((await fingerprint(scan.path, getSettings())) !== scan.fingerprint)
-    throw new Error("Media or policy changed since scanning");
   return raw()
     .transaction(() => {
       requireRemediationAllowed();
@@ -310,7 +302,6 @@ export async function queuePreMutationRetry(
       if (
         active() ||
         !preMutationRetryProof(current) ||
-        fresh.scan.fingerprint !== scan.fingerprint ||
         !sameIdentity(fresh.identity, identity)
       )
         throw new Error("Retry proof changed; manual inspection required");
@@ -328,6 +319,7 @@ export async function queuePreMutationRetry(
         .run(new Date().toISOString(), operationId);
       const job = jobQueue.enqueue("remediate", {
         mediaId,
+        title: fresh.media.title,
         fingerprint: scan.fingerprint,
         identity,
         retry: { operationId, token },

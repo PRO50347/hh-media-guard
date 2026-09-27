@@ -1,7 +1,7 @@
-import { constants } from "node:fs";
-import { link, lstat, open, realpath, unlink } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { access, link, lstat, open, realpath, unlink } from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   audit,
   getConfigDir,
@@ -27,7 +27,7 @@ function permitted() {
       "Explicit Manual Fix & Redownload, Quarantine or Automatic mode and ALLOW_DESTRUCTIVE_ACTIONS=true are required",
     );
 }
-async function quarantineRoot() {
+export async function quarantineRoot() {
   const root = validAbsolute(getSettings().quarantinePath || "");
   if (
     root === "/" ||
@@ -42,6 +42,7 @@ async function quarantineRoot() {
         "Quarantine must be separate from config and mapped media",
       );
   }
+  await access(root, constants.W_OK);
   return root;
 }
 function same(
@@ -85,6 +86,7 @@ export async function moveExclusive(
   linkFile = link,
   beforeUnlink: () => void = () => {},
   expectedSource?: { dev: number; ino: number; size: number; mtimeMs: number },
+  preserveSource = false,
 ) {
   const sourceParent = await openDirectory(path.dirname(source));
   let targetParent: Awaited<ReturnType<typeof openDirectory>> | undefined;
@@ -101,21 +103,28 @@ export async function moveExclusive(
     const before = await input.stat();
     if (expectedSource && !same(expectedSource, before))
       throw new Error("Source changed after validation; original retained");
-    let targetIdentity: Awaited<ReturnType<typeof lstat>>;
+    let targetIdentity: Stats;
     if (!before.isFile()) throw new Error("Source is not a regular file");
-    try {
-      await linkFile(source, target);
-      targetIdentity = await lstat(target);
-      if (!same(before, targetIdentity))
-        throw new Error("Hardlink identity mismatch; original retained");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+    let copyRequired = preserveSource;
+    if (!preserveSource) {
+      try {
+        await linkFile(source, target);
+        targetIdentity = await lstat(target);
+        if (!same(before, targetIdentity))
+          throw new Error("Hardlink identity mismatch; original retained");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+        copyRequired = true;
+      }
+    }
+    if (copyRequired) {
       const output = await open(
         /* turbopackIgnore: true */ target,
-        "wx",
+        "wx+",
         0o600,
       );
       try {
+        const copiedHash = preserveSource ? createHash("sha256") : undefined;
         const buffer = Buffer.alloc(1024 * 1024);
         let offset = 0;
         for (;;) {
@@ -126,6 +135,7 @@ export async function moveExclusive(
             offset,
           );
           if (!bytesRead) break;
+          copiedHash?.update(buffer.subarray(0, bytesRead));
           let written = 0;
           while (written < bytesRead) {
             const result = await output.write(
@@ -141,6 +151,26 @@ export async function moveExclusive(
           offset += bytesRead;
         }
         await output.sync();
+        if (copiedHash) {
+          const retainedHash = createHash("sha256");
+          let verified = 0;
+          for (;;) {
+            const { bytesRead } = await output.read(
+              buffer,
+              0,
+              buffer.length,
+              verified,
+            );
+            if (!bytesRead) break;
+            retainedHash.update(buffer.subarray(0, bytesRead));
+            verified += bytesRead;
+          }
+          if (
+            verified !== offset ||
+            retainedHash.digest("hex") !== copiedHash.digest("hex")
+          )
+            throw new Error("Quarantine copy could not be verified");
+        }
         targetIdentity = await output.stat();
         if (offset !== before.size)
           throw new Error("Source changed during copy");
@@ -161,8 +191,10 @@ export async function moveExclusive(
     // Flush the new directory entry before removing the original entry.
     await targetParent.sync();
     beforeUnlink();
-    await unlink(source);
-    await sourceParent.sync();
+    if (!preserveSource) {
+      await unlink(source);
+      await sourceParent.sync();
+    }
   } finally {
     await input?.close();
     await targetParent?.close();
@@ -170,10 +202,25 @@ export async function moveExclusive(
   }
 }
 
+export async function preserveRecoveryCopy(
+  scan: ScanResult,
+  signal: AbortSignal,
+  authorize: () => void,
+) {
+  return quarantineFile(scan, signal, authorize, true);
+}
 export async function moveToQuarantine(
   scan: ScanResult,
   signal?: AbortSignal,
-  requireJobOwnership: () => void = () => {},
+  authorize: () => void = () => {},
+) {
+  return quarantineFile(scan, signal, authorize, false);
+}
+async function quarantineFile(
+  scan: ScanResult,
+  signal: AbortSignal | undefined,
+  requireJobOwnership: () => void,
+  preserveSource: boolean,
 ) {
   const authorize = () => {
     requireJobOwnership();
@@ -249,6 +296,7 @@ export async function moveToQuarantine(
       undefined,
       authorize,
       originalIdentity,
+      preserveSource,
     );
     const kept = await lstat(target);
     const retainedIdentity = {
@@ -262,7 +310,21 @@ export async function moveToQuarantine(
         "UPDATE quarantines SET state='quarantined',evidence=? WHERE id=? AND state='moving'",
       )
       .run(
-        JSON.stringify({ scan, originalPath: original, retainedIdentity }),
+        JSON.stringify({
+          scan,
+          originalPath: original,
+          retainedIdentity,
+          ...(preserveSource
+            ? {
+                sourceIdentity: {
+                  dev: originalIdentity.dev,
+                  ino: originalIdentity.ino,
+                  size: originalIdentity.size,
+                  mtimeMs: originalIdentity.mtimeMs,
+                },
+              }
+            : {}),
+        }),
         id,
       );
     audit("quarantine", `Quarantined ${id}`);
@@ -279,6 +341,36 @@ export async function moveToQuarantine(
     throw error;
   }
 }
+/** Recheck the retained object immediately before dispatching Arr deletion. */
+export async function verifyRecoveryCopy(id: string) {
+  permitted();
+  const item = quarantine(id);
+  if (!item || item.state !== "quarantined")
+    throw new Error("Verified recovery copy is unavailable");
+  const root = await quarantineRoot();
+  const { retainedIdentity: retained, sourceIdentity } = JSON.parse(
+    item.evidence,
+  );
+  if (
+    !retained ||
+    !within(root, item.quarantine_path) ||
+    (await realpath(item.quarantine_path)) !== item.quarantine_path
+  )
+    throw new Error("Verified recovery copy is unavailable");
+  const current = await lstat(item.quarantine_path);
+  if (!current.isFile() || !same(retained, current))
+    throw new Error("Verified recovery copy changed");
+  const original = await safeMediaPath(item.original_path, roots());
+  const active = await lstat(original);
+  if (
+    !sourceIdentity ||
+    original !== item.original_path ||
+    !same(sourceIdentity, active) ||
+    (active.dev === current.dev && active.ino === current.ino)
+  )
+    throw new Error("Media or policy changed since scanning");
+}
+
 export async function restoreFromQuarantine(id: string) {
   permitted();
   const item = quarantine(id);

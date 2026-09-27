@@ -183,7 +183,7 @@ export const arrTransport: ArrTransport = async (
           if (status < 200 || status >= 300) {
             reject(
               new SafeError(
-                "arr.http",
+                `arr.http.${status}`,
                 `Arr returned HTTP ${status}. ${status === 401 ? "API key rejected; check the key." : status === 403 ? "Access forbidden; check the API key and proxy permissions." : status === 404 ? "API endpoint not found; check the URL base/path and API v3 support." : status >= 300 && status < 400 ? "Redirect rejected; enter the final server URL including its URL base." : "Check service/proxy availability."}`,
               ),
             );

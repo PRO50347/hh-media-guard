@@ -13,7 +13,7 @@ export async function cleanupVerifiedQuarantine(id: string) {
     const row = raw()
       .prepare(
         `SELECT s.result FROM operations o JOIN operation_steps s ON s.operation_id=o.id
-      WHERE o.quarantine_id=? AND o.state='complete' AND s.step='verified-replacement'
+      WHERE o.quarantine_id=? AND o.state IN ('complete','superseded') AND s.step='verified-replacement'
       ORDER BY s.id DESC LIMIT 1`,
       )
       .get(id) as { result: string } | undefined;
@@ -28,7 +28,7 @@ export async function cleanupVerifiedQuarantine(id: string) {
   const journal = (name: string) => {
     const op = raw()
       .prepare(
-        "SELECT id FROM operations WHERE quarantine_id=? AND state='complete'",
+        "SELECT id FROM operations WHERE quarantine_id=? AND state IN ('complete','superseded')",
       )
       .get(id) as { id: string } | undefined;
     if (!op)

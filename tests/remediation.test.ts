@@ -1,11 +1,6 @@
-import * as historyModule from "../src/lib/remediation-history";
-import { requireManualAdmission } from "../src/lib/remediation-admission";
-import {
-  preMutationRetryProof,
-  type RetryOperation,
-} from "../src/lib/remediation-retry";
 import {
   beforeAll,
+  beforeEach,
   afterAll,
   afterEach,
   describe,
@@ -18,22 +13,25 @@ import {
   mkdir,
   rm,
   lstat,
-  writeFile,
   readFile,
+  unlink,
+  writeFile,
   rename,
   symlink,
 } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { SafeError } from "../src/lib/safe-error";
 import { RadarrClient, SonarrClient } from "../src/lib/clients";
-import type { ArrTransport } from "../src/lib/arr-transport";
+import { type ArrTransport } from "../src/lib/arr-transport";
+import * as transportModule from "../src/lib/arr-transport";
+import * as quarantineModule from "../src/lib/quarantine";
 import {
   remediate,
   verifyReplacement,
   type MediaIdentity,
 } from "../src/lib/remediation";
-import { resolveAttention } from "../src/lib/attention";
-import { reserveReplacement, resetReplacement } from "../src/lib/retries";
 import {
   addMapping,
   saveSettings,
@@ -47,28 +45,32 @@ import {
 import { scanFile } from "../src/lib/scanner";
 import { runProcess } from "../src/lib/process";
 import { encryptSecret } from "../src/lib/crypto";
-import * as transportModule from "../src/lib/arr-transport";
 import {
   queueManualRemediation,
   queuePreMutationRetry,
   manualRemediationControl,
-  attentionRemediation,
 } from "../src/lib/manual-remediation";
+import { requireManualAdmission } from "../src/lib/remediation-admission";
+import {
+  preMutationRetryProof,
+  type RetryOperation,
+} from "../src/lib/remediation-retry";
+import { reserveReplacement, resetReplacement } from "../src/lib/retries";
+import * as runtimeModule from "../src/lib/runtime-lease";
+import { requireAdmin } from "../src/lib/auth";
 import { executeJob } from "../src/lib/worker";
 import { cleanupVerifiedQuarantine } from "../src/lib/quarantine-cleanup";
-import { RuntimeLease, attachRuntimeLease } from "../src/lib/runtime-lease";
-import { POST as queueRequest } from "../src/app/api/jobs/route";
-import { DELETE as cleanupRequest } from "../src/app/api/quarantine/route";
-import { requireAdmin } from "../src/lib/auth";
+import { POST } from "../src/app/api/jobs/route";
+vi.mock("node:fs/promises", async (original) => ({
+  ...(await original<typeof import("node:fs/promises")>()),
+}));
 vi.mock("../src/lib/auth", () => ({
   requireAdmin: vi.fn(async () => ({ username: "fixture-admin" })),
 }));
-let root: string;
-let media: string;
-let destination: string;
+let root: string, media: string, destination: string;
 let sequence = 1000;
 beforeAll(async () => {
-  root = await mkdtemp(path.join(tmpdir(), "media-guard-remediation-"));
+  root = await mkdtemp(path.join(tmpdir(), "hh-delete-remediation-"));
   media = path.join(root, "media");
   destination = path.join(root, "quarantine");
   await mkdir(media);
@@ -82,19 +84,27 @@ beforeAll(async () => {
       enabled: true,
     });
 });
-afterAll(() => rm(root, { recursive: true, force: true }));
+beforeEach(() => {
+  raw().exec(
+    "DELETE FROM operation_steps; DELETE FROM operations; DELETE FROM jobs; DELETE FROM retry_titles; DELETE FROM retry_releases; DELETE FROM quarantines; DELETE FROM attention;",
+  );
+  process.env.ALLOW_DESTRUCTIVE_ACTIONS = "true";
+  saveSettings({
+    safetyMode: "manual",
+    quarantinePath: destination,
+    retryLimit: 3,
+    retryCooldownMinutes: 1,
+  });
+});
 afterEach(() => {
   vi.restoreAllMocks();
   process.env.ALLOW_DESTRUCTIVE_ACTIONS = "false";
   saveSettings({ safetyMode: "monitor" });
 });
-async function fixture(
-  source: "sonarr" | "radarr" = "radarr",
-  language = "spa",
-) {
-  const id = sequence++;
-  const file = path.join(media, `${id}.mka`);
+afterAll(() => rm(root, { recursive: true, force: true }));
+async function audio(file: string, language = "spa") {
   await runProcess("ffmpeg", [
+    "-y",
     "-v",
     "error",
     "-f",
@@ -107,6 +117,11 @@ async function fixture(
     "flac",
     file,
   ]);
+}
+async function fixture(source: "sonarr" | "radarr" = "sonarr") {
+  const id = sequence++,
+    file = path.join(media, `${id}.mka`);
+  await audio(file);
   const scan = await scanFile(file);
   saveScan(scan);
   const identity: MediaIdentity = {
@@ -120,7 +135,8 @@ async function fixture(
   upsertMediaItem({
     source,
     arrId: id,
-    title: `Fixture ${id}`,
+    title:
+      source === "sonarr" ? "ALF S04E01 — Baby, Come Back" : "Fixture movie",
     path: file,
     identity: String(id),
   });
@@ -132,1312 +148,1067 @@ async function fixture(
     .run(JSON.stringify(identity), scan.decision, scan.fingerprint, mediaId);
   return { scan, identity, mediaId };
 }
-function enable() {
-  process.env.ALLOW_DESTRUCTIVE_ACTIONS = "true";
-  saveSettings({
-    safetyMode: "automatic",
-    quarantinePath: destination,
-    retryLimit: 3,
-    retryCooldownMinutes: 1,
-  });
-}
-function mock(
-  identity: MediaIdentity,
-  options: {
-    renamed?: boolean;
-    historyCase?:
-      | "missing-path"
-      | "missing-download"
-      | "blank-download"
-      | "repeated-import"
-      | "conflicting-import"
-      | "repeated-grab"
-      | "conflicting-grab"
-      | "shared-download"
-      | "unsafe-path"
-      | "no-grab-metadata";
-    blocklistCase?:
-      | "absent"
-      | "ambiguous"
-      | "wrong-title"
-      | "wrong-identity"
-      | "wrong-protocol"
-      | "wrong-indexer"
-      | "old-only"
-      | "unavailable";
-    redownload?: boolean;
-    badHistory?: boolean;
-    wrongHistory?: "path" | "download" | "identity";
-    failSearch?: boolean;
-    failReject?: boolean;
-    ambiguous?: boolean;
-    wrongFile?: boolean;
-    wrongCommand?: boolean;
-    languages?: { id: number; name: string }[];
-  } = {},
+type Options = {
+  rename?: boolean;
+  languages?: string[];
+  deleteOutcome?:
+    | "404"
+    | "uncertain"
+    | "still-reported"
+    | "path-remains"
+    | "path-reported";
+  blocklist?: "absent" | "ambiguous";
+  failSearch?: boolean;
+  shared?: boolean;
+  pack?: boolean;
+  badHistory?: boolean;
+  changeBeforeDelete?: boolean;
+};
+function wire(
+  data: Awaited<ReturnType<typeof fixture>>,
+  options: Options = {},
 ) {
-  let marked = false;
+  const { identity, scan } = data;
+  let deleted = false,
+    marked = false,
+    reads = 0;
+  const calls: { method: string; path: string; body: unknown }[] = [];
   const quality = {
-    quality: { id: 1, name: "SDTV", source: "television", resolution: 480 },
+    quality: { id: 5, name: "WEBDL-720p" },
     revision: { version: 1, real: 0, isRepack: false },
   };
-  const calls: { method: string; path: string; body: unknown }[] = [];
+  const file = {
+    id: identity.fileId,
+    movieId: identity.entityId,
+    seriesId: identity.seriesId,
+    path: identity.arrPath,
+    languages: (options.languages || ["Spanish"]).map((name, i) => ({
+      id: i + 1,
+      name,
+    })),
+  };
   const transport: ArrTransport = async (url, _key, method, body) => {
-    calls.push({ method, path: url.pathname, body });
-    if (method === "POST") {
-      const op = operation(identity.fileId);
-      const intent = url.pathname.includes("/history/failed/")
-        ? "history-failed-intent"
-        : (body as { name: string }).name.endsWith("Search")
-          ? "replacement-search-intent"
-          : "rescan-command-intent";
-      expect(
-        raw()
-          .prepare(
-            "SELECT 1 FROM operation_steps WHERE operation_id=? AND step=?",
-          )
-          .get(op.id, intent),
-      ).toBeTruthy();
-      expect(
-        raw()
-          .prepare("SELECT 1 FROM retry_titles WHERE identity=?")
-          .get(`${identity.source}:${identity.entityId}`),
-      ).toBeTruthy();
-      if (intent === "replacement-search-intent")
-        expect(
-          raw()
-            .prepare(
-              "SELECT 1 FROM operation_steps WHERE operation_id=? AND step='blocklist-verified'",
-            )
-            .get(op.id),
-        ).toBeTruthy();
-    }
     const endpoint = url.pathname.replace("/api/v3", "");
-    if (
-      endpoint ===
-      `/${identity.source === "sonarr" ? "episodefile" : "moviefile"}/${identity.fileId}`
-    )
-      return {
-        id: options.wrongFile ? identity.fileId + 1 : identity.fileId,
-        path: identity.arrPath,
-        movieId: identity.entityId,
-        seriesId: identity.seriesId,
-        languages: options.languages,
-      };
+    calls.push({ method, path: endpoint, body });
+    const fileEndpoint = `/${identity.source === "sonarr" ? "episodefile" : "moviefile"}/${identity.fileId}`;
+    if (method === "DELETE" && endpoint === fileEndpoint) {
+      const op = operation(identity.fileId);
+      const steps = markers(op.id);
+      expect(steps).toContain("backup-copy");
+      expect(steps).toContain("arr-delete-intent");
+      expect(
+        await readFile(quarantine(op.quarantine_id!)!.quarantine_path),
+      ).toEqual(await readFile(scan.path));
+      // The active file MUST still exist until Arr handles this exact-ID DELETE.
+      expect((await lstat(scan.path)).isFile()).toBe(true);
+      if (options.deleteOutcome === "404")
+        throw new SafeError("arr.http.404", "Arr returned HTTP 404");
+      if (options.deleteOutcome !== "path-remains") await unlink(scan.path);
+      deleted = options.deleteOutcome !== "still-reported";
+      if (options.deleteOutcome === "uncertain")
+        throw new Error("Response lost after deletion");
+      return undefined; // real no-content success
+    }
+    if (method === "GET" && endpoint === fileEndpoint) {
+      reads++;
+      if (deleted) throw new SafeError("arr.http.404", "Arr returned HTTP 404");
+      if (options.changeBeforeDelete && reads >= 4)
+        return { ...file, id: file.id + 1 };
+      return file;
+    }
     if (endpoint === "/episode")
       return [
         {
           id: identity.entityId,
           seriesId: identity.seriesId,
-          episodeFileId: identity.fileId,
-          seasonNumber: 1,
+          episodeFileId: deleted ? 0 : file.id,
+          seasonNumber: 4,
           episodeNumber: 1,
-          title: "Fixture episode",
+          title: "Baby, Come Back",
         },
+        ...(options.pack
+          ? [
+              {
+                id: identity.entityId + 1,
+                seriesId: identity.seriesId,
+                episodeFileId: file.id,
+                seasonNumber: 4,
+                episodeNumber: 2,
+                title: "Other",
+              },
+            ]
+          : []),
       ];
+    if (endpoint === "/episodefile" || endpoint === "/moviefile")
+      return !deleted
+        ? [file]
+        : options.deleteOutcome === "path-reported"
+          ? [{ ...file, id: file.id + 99 }]
+          : [];
     if (endpoint === "/config/downloadclient")
-      return { autoRedownloadFailed: Boolean(options.redownload) };
+      return { autoRedownloadFailed: false };
     if (endpoint === "/history") {
-      expect(
-        url.searchParams.has("episodeId") ||
-          url.searchParams.has("movieIds") ||
-          url.searchParams.has("downloadId"),
-      ).toBe(true);
-      const reference =
+      const ref =
         identity.source === "sonarr"
           ? { episodeId: identity.entityId, seriesId: identity.seriesId }
           : { movieId: identity.entityId };
-      const records = [
-        {
-          id: 1,
-          eventType: "downloadFolderImported",
-          sourceTitle: `Fixture.Release.${identity.entityId}`,
-          downloadId: identity.downloadId,
-          data: {
-            droppedPath: `/downloads/complete/Fixture.Release.${identity.entityId}/original.mka`,
-            importedPath:
-              options.wrongHistory === "path"
-                ? "/wrong/path"
-                : identity.arrPath,
-            imdbId: null,
-            releaseGroup: null,
-            unrelated: null,
-            score: 7,
-            extra: { present: false },
-          },
-          ...reference,
+      const original = options.rename
+        ? identity.arrPath + ".WEBDL-720p"
+        : identity.arrPath;
+      const imported = {
+        id: 1,
+        ...ref,
+        eventType: "downloadFolderImported",
+        downloadId: identity.downloadId,
+        sourceTitle: "Alf S04E01 German 720p WEB x264-TVNATiON",
+        data: {
+          droppedPath: "/downloads/ALF/original.mkv",
+          importedPath: original,
+          releaseGroup: null,
         },
-        {
-          id: 2,
-          eventType: "grabbed",
-          downloadId: identity.downloadId,
-          sourceTitle: options.badHistory
-            ? 123
-            : `Fixture.Release.${identity.entityId}`,
-          quality,
-          data: {
-            indexer: "Fixture Indexer",
-            publishedDate: "2026-01-01T00:00:00Z",
-            size: "123456",
-            protocol: "1",
-            guid: "fixture-release-guid",
-            imdbId: null,
-            releaseGroup: null,
-          },
-          ...reference,
+      };
+      const grabbed = {
+        id: 2,
+        ...ref,
+        eventType: "grabbed",
+        downloadId: identity.downloadId,
+        sourceTitle: imported.sourceTitle,
+        quality,
+        data: {
+          indexer: "Fixture",
+          size: "1000",
+          protocol: "1",
+          publishedDate: "2026-01-01T00:00:00Z",
+          imdbId: null,
+          releaseGroup: null,
         },
-      ];
-      if (options.wrongHistory === "download")
-        records[1].downloadId = "unrelated-download";
-      if (options.wrongHistory === "identity")
-        Object.assign(
-          records[1],
-          identity.source === "sonarr"
-            ? { episodeId: 999999 }
-            : { movieId: 999999 },
-        );
-      const shaped = records as unknown as Record<string, unknown>[];
-      const imported = shaped[0];
-      const grabbed = shaped[1];
-      const data = imported.data as Record<string, unknown>;
-      if (options.renamed) {
-        data.importedPath = identity.arrPath + ".original";
-        shaped.push({
-          id: 5,
-          ...reference,
-          eventType:
-            identity.source === "sonarr"
-              ? "episodeFileRenamed"
-              : "movieFileRenamed",
-          data: { sourcePath: data.importedPath, path: identity.arrPath },
-        });
-      }
-      if (options.historyCase === "missing-path") delete data.importedPath;
-      if (options.historyCase === "unsafe-path")
-        data.importedPath = "/tv/../" + identity.arrPath;
-      if (options.historyCase === "missing-download")
-        delete imported.downloadId;
-      if (options.historyCase === "blank-download") imported.downloadId = "";
-      if (options.historyCase === "no-grab-metadata")
-        grabbed.data = { releaseGroup: null };
-      if (options.historyCase === "repeated-import")
-        shaped.push({ ...imported, id: 3 });
-      if (options.historyCase === "conflicting-import")
-        shaped.push({ ...imported, id: 3, downloadId: "different" });
-      if (options.historyCase === "repeated-grab")
-        shaped.push({ ...grabbed, id: 4 });
-      if (options.historyCase === "conflicting-grab")
-        shaped.push({
-          ...grabbed,
-          id: 4,
-          data: { ...(grabbed.data as object), size: "98765" },
-        });
-      if (options.historyCase === "shared-download")
-        shaped.push({ ...grabbed, id: 4, episodeId: 999999, movieId: 999999 });
-      // Identity-scoped lookup hides other titles; download-scoped lookup must expose them.
-      const selected = options.ambiguous
+      };
+      const records = options.badHistory
         ? []
         : url.searchParams.has("downloadId")
-          ? shaped.filter(
-              (row) => row.downloadId === url.searchParams.get("downloadId"),
-            )
-          : shaped.filter((row) => row.eventType !== "grabbed");
-      return { records: selected, totalRecords: selected.length };
-    }
-    if (endpoint === "/blocklist") {
-      expect(
-        url.searchParams.get(
-          identity.source === "sonarr" ? "seriesIds" : "movieIds",
-        ),
-      ).toBe(String(identity.seriesId || identity.entityId));
-      if (marked && options.blocklistCase === "unavailable")
-        throw new Error("Read interrupted");
-      const entry = {
-        id: 400,
-        sourceTitle: `Fixture.Release.${identity.entityId}`,
-        seriesId: identity.seriesId,
-        episodeIds: [identity.entityId],
-        movieId: identity.entityId,
-        protocol: "usenet",
-        indexer: "Fixture Indexer",
-        quality,
-      };
-      if (options.blocklistCase === "wrong-title")
-        entry.sourceTitle = "Other.Release";
-      if (options.blocklistCase === "wrong-identity") {
-        entry.movieId = 99;
-        entry.episodeIds = [99];
-      }
-      if (options.blocklistCase === "wrong-protocol")
-        entry.protocol = "torrent";
-      if (options.blocklistCase === "wrong-indexer")
-        entry.indexer = "Other Indexer";
-      const records =
-        options.blocklistCase === "old-only"
-          ? [entry]
-          : !marked || options.blocklistCase === "absent"
-            ? []
-            : options.blocklistCase === "ambiguous"
-              ? [entry, { ...entry, id: 401 }]
-              : [entry];
+          ? [
+              grabbed,
+              ...(options.shared
+                ? [{ ...grabbed, id: 7, episodeId: 999999, movieId: 999999 }]
+                : []),
+            ]
+          : [
+              imported,
+              ...(options.rename
+                ? [
+                    {
+                      id: 3,
+                      ...ref,
+                      eventType:
+                        identity.source === "sonarr"
+                          ? "episodeFileRenamed"
+                          : "movieFileRenamed",
+                      data: { sourcePath: original, path: identity.arrPath },
+                    },
+                  ]
+                : []),
+            ];
       return { records, totalRecords: records.length };
     }
-    if (endpoint === "/command") {
-      if (
-        options.failSearch &&
-        (body as { name: string }).name.endsWith("Search")
-      )
-        throw new Error("Ambiguous transport failure");
-      return { id: 77 };
+    if (endpoint === "/blocklist") {
+      const entry = {
+        id: 10,
+        movieId: identity.entityId,
+        seriesId: identity.seriesId,
+        episodeIds: [identity.entityId],
+        sourceTitle: "Alf S04E01 German 720p WEB x264-TVNATiON",
+        indexer: "Fixture",
+        protocol: "usenet",
+        quality,
+      };
+      const records =
+        !marked || options.blocklist === "absent"
+          ? []
+          : options.blocklist === "ambiguous"
+            ? [entry, { ...entry, id: 11 }]
+            : [entry];
+      return { records, totalRecords: records.length };
     }
-    if (endpoint === "/command/77")
-      return { id: options.wrongCommand ? 78 : 77, status: "completed" };
-    if (endpoint === "/moviefile" || endpoint === "/episodefile") return [];
-    if (endpoint === "/history/failed/2") {
+    if (endpoint === "/history/failed/2" && method === "POST") {
+      expect(deleted).toBe(true);
+      expect(markers(operation(identity.fileId).id)).toContain(
+        "history-failed-intent",
+      );
       marked = true;
-      if (options.failReject) throw new Error("Uncertain rejection response");
       return {};
     }
-    throw new Error(`Unexpected mock endpoint ${endpoint}`);
-  };
-  const client =
-    identity.source === "sonarr"
-      ? new SonarrClient("http://sonarr-fixture.test", "test-key", transport)
-      : new RadarrClient("http://radarr-fixture.test", "test-key", transport);
-  return { client, calls, transport };
-}
-const operation = (fileId: number) =>
-  raw().prepare("SELECT * FROM operations WHERE file_id=?").get(fileId) as {
-    id: string;
-    state: string;
-    error?: string;
-    quarantine_id: string;
-  };
-describe("automatic remediation against contract mocks only", () => {
-  it("refuses an inconsistent file resource before moving or mutating anything", async () => {
-    const { scan, identity } = await fixture();
-    enable();
-    const { client, calls } = mock(identity, { wrongFile: true });
-    expect(await remediate(scan, identity, client)).toBe("needs-attention");
-    expect(calls.every((call) => call.method === "GET")).toBe(true);
-    expect((await lstat(scan.path)).isFile()).toBe(true);
-  });
-  it("does not reject or search after a mismatched reconciliation command", async () => {
-    const { scan, identity } = await fixture();
-    enable();
-    const { client, calls } = mock(identity, { wrongCommand: true });
-    expect(await remediate(scan, identity, client)).toBe("needs-attention");
-    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
-    expect(operation(identity.fileId).state).toBe("needs-attention");
-  });
-  for (const source of ["sonarr", "radarr"] as const)
-    it(`${source}: quarantines, reconciles, rejects, searches once and verifies replacement`, async () => {
-      const { scan, identity } = await fixture(source);
-      enable();
-      const { client, calls } = mock(identity);
-      await remediate(scan, identity, client);
-      expect(operation(identity.fileId).state).toBe("pending");
-      await expect(lstat(scan.path)).rejects.toMatchObject({ code: "ENOENT" });
-      expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(0);
-      expect(
-        calls.filter((call) => call.path === "/api/v3/history/failed/2"),
-      ).toHaveLength(1);
-      const mutations = calls.filter((call) => call.method === "POST");
-      expect(mutations.map((call) => call.path)).toEqual([
-        "/api/v3/command",
-        "/api/v3/history/failed/2",
-        "/api/v3/command",
-      ]);
-      const before = calls.length;
-      await remediate(scan, identity, client);
-      expect(calls).toHaveLength(before);
-      await verifyReplacement(
-        { ...scan, decision: "needs-analysis" },
-        { ...identity, fileId: identity.fileId + 10000 },
+    if (endpoint === "/command" && method === "POST") {
+      expect(deleted && marked).toBe(true);
+      expect(markers(operation(identity.fileId).id)).toContain(
+        "blocklist-verified",
       );
-      expect(operation(identity.fileId).state).toBe("pending");
-      await runProcess("ffmpeg", [
-        "-v",
-        "error",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=440:duration=1",
-        "-metadata:s:a:0",
-        "language=eng",
-        "-c:a",
-        "flac",
-        scan.path,
-      ]);
-      const replacement = await scanFile(scan.path);
-      saveScan(replacement);
-      const replacementIdentity = {
-        ...identity,
-        fileId: identity.fileId + 10000,
-      };
-      await expect(
-        verifyReplacement(
-          replacement,
-          replacementIdentity,
-          mock(replacementIdentity, { wrongFile: true }).client,
-        ),
-      ).rejects.toThrow("identity");
-      expect(operation(identity.fileId).state).toBe("pending");
-      await verifyReplacement(
-        replacement,
-        replacementIdentity,
-        mock(replacementIdentity).client,
+      expect(markers(operation(identity.fileId).id)).toContain(
+        "replacement-search-intent",
       );
-      expect(operation(identity.fileId).state).toBe("complete");
-    });
-  it("Monitor Only prohibits all remediation before any mock requests", async () => {
-    const { scan, identity } = await fixture();
-    const { client, calls } = mock(identity);
-    await expect(remediate(scan, identity, client)).rejects.toThrow("disabled");
-    expect(calls).toHaveLength(0);
-  });
-  it("refuses conflicting Arr-owned automatic redownload without moving media", async () => {
-    const { scan, identity } = await fixture();
-    enable();
-    const { client, calls } = mock(identity, { redownload: true });
-    await remediate(scan, identity, client);
-    expect(operation(identity.fileId).state).toBe("needs-attention");
-    expect(calls.every((call) => call.method === "GET")).toBe(true);
-    expect((await lstat(scan.path)).isFile()).toBe(true);
-  });
-  it("ambiguous history cannot authorize quarantine or mutation", async () => {
-    const { scan, identity } = await fixture();
-    enable();
-    const { client, calls } = mock(identity, { ambiguous: true });
-    await remediate(scan, identity, client);
-    expect(operation(identity.fileId).state).toBe("needs-attention");
-    expect(calls.every((call) => call.method === "GET")).toBe(true);
-    expect((await lstat(scan.path)).isFile()).toBe(true);
-  });
-  it("partial Arr failure remains durable and never repeats a possibly dispatched search", async () => {
-    const { scan, identity } = await fixture();
-    enable();
-    const { client, calls } = mock(identity, { failSearch: true });
-    await remediate(scan, identity, client);
-    expect(operation(identity.fileId).state).toBe("needs-attention");
-    const before = calls.length;
-    await remediate(scan, identity, client);
-    expect(calls).toHaveLength(before);
-  });
-  it("never searches after uncertain rejection, including after an administrator reset", async () => {
-    const { scan, identity } = await fixture();
-    enable();
-    const { client, calls } = mock(identity, { failReject: true });
-    expect(await remediate(scan, identity, client)).toBe("needs-attention");
-    expect(
-      calls.filter((call) => call.path === "/api/v3/command"),
-    ).toHaveLength(1);
-    const op = operation(identity.fileId);
-    const attention = raw()
-      .prepare("SELECT id FROM attention WHERE subject=?")
-      .get(op.id) as { id: string };
-    resolveAttention(attention.id, "reset", "fixture-admin");
-    const before = calls.length;
-    expect(await remediate(scan, identity, client)).toBe("needs-attention");
-    expect(calls).toHaveLength(before);
-    expect(operation(identity.fileId).state).toBe("needs-attention");
-  });
-  it("persists per-release aliases, title limits, backoff and deliberate reset", () => {
-    enable();
-    expect(
-      reserveReplacement("fixture:title", "release-a", 0, ["download-a"]),
-    ).toBe(1);
-    expect(() =>
-      reserveReplacement("fixture:title", "release-a", 99999999, [
-        "new-download",
-      ]),
-    ).toThrow("same rejected");
-    expect(() =>
-      reserveReplacement("fixture:title", "renamed-release", 99999999, [
-        "download-a",
-      ]),
-    ).toThrow("same rejected");
-    expect(() => reserveReplacement("fixture:title", "release-b", 1)).toThrow(
-      "cooldown",
-    );
-    expect(reserveReplacement("fixture:title", "release-b", 60000)).toBe(2);
-    expect(reserveReplacement("fixture:title", "release-c", 180000)).toBe(3);
-    expect(() =>
-      reserveReplacement("fixture:title", "release-d", 99999999),
-    ).toThrow("retry limit");
-    resetReplacement("fixture:title", "fixture-admin");
-    expect(reserveReplacement("fixture:title", "release-d", 99999999)).toBe(1);
-  });
-});
-
-function wire(
-  identity: MediaIdentity,
-  options: Parameters<typeof mock>[1] = {},
-) {
+      expect(body).toEqual(
+        identity.source === "sonarr"
+          ? { name: "EpisodeSearch", episodeIds: [identity.entityId] }
+          : { name: "MoviesSearch", movieIds: [identity.entityId] },
+      );
+      if (options.failSearch) throw new Error("Unknown search outcome");
+      return { id: 77 };
+    }
+    throw new Error(`Unexpected endpoint ${method} ${endpoint}`);
+  };
   saveIntegration(
     identity.source,
     true,
     `http://${identity.source}-fixture.test`,
-    encryptSecret("test-key"),
+    encryptSecret("fixture-key"),
   );
-  const contract = mock(identity, options);
-  vi.spyOn(transportModule, "arrTransport").mockImplementation(
-    contract.transport,
-  );
-  return contract;
+  vi.spyOn(transportModule, "arrTransport").mockImplementation(transport);
+  const client =
+    identity.source === "sonarr"
+      ? new SonarrClient("http://sonarr-fixture.test", "fixture-key", transport)
+      : new RadarrClient(
+          "http://radarr-fixture.test",
+          "fixture-key",
+          transport,
+        );
+  return { calls, client, file, transport };
 }
-function requestRemediation(mediaId: string, extra = {}) {
-  return queueRequest(
-    new Request("http://fixture/api/jobs", {
-      method: "POST",
-      body: JSON.stringify({ kind: "remediate", mediaId, ...extra }),
-    }),
-  );
+function operation(fileId: number) {
+  return raw()
+    .prepare(
+      "SELECT * FROM operations WHERE file_id=? ORDER BY created_at DESC LIMIT 1",
+    )
+    .get(fileId) as RetryOperation;
 }
-async function runQueued(id: string) {
+function markers(id: string) {
+  return (
+    raw()
+      .prepare(
+        "SELECT step FROM operation_steps WHERE operation_id=? ORDER BY id",
+      )
+      .all(id) as { step: string }[]
+  ).map((s) => s.step);
+}
+async function run(id: string) {
   const job = jobQueue.claim()!;
   expect(job.id).toBe(id);
   await executeJob(job, new AbortController().signal);
-  return job;
+  return jobQueue.get(id)!;
+}
+async function fix(data: Awaited<ReturnType<typeof fixture>>) {
+  const response = await POST(
+    new Request("http://fixture/api/jobs", {
+      method: "POST",
+      body: JSON.stringify({ kind: "remediate", mediaId: data.mediaId }),
+    }),
+  );
+  expect(response.status).toBe(202);
+  const result = await response.json();
+  await run(result.id);
+  return result.id as string;
+}
+const mutations = (calls: ReturnType<typeof wire>["calls"]) =>
+  calls.filter((c) => c.method !== "GET");
+async function replacement(
+  data: Awaited<ReturnType<typeof fixture>>,
+  language = "eng",
+) {
+  await audio(data.scan.path, language);
+  const identity = { ...data.identity, fileId: data.identity.fileId + 10000 };
+  const scan = await scanFile(data.scan.path);
+  saveScan(scan);
+  raw()
+    .prepare(
+      "UPDATE media_items SET identity=?,details=?,fingerprint=?,decision=? WHERE id=?",
+    )
+    .run(
+      String(identity.fileId),
+      JSON.stringify(identity),
+      scan.fingerprint,
+      scan.decision,
+      data.mediaId,
+    );
+  const next = { ...data, identity, scan };
+  const contract = wire(next, {
+    languages: [
+      language === "eng"
+        ? "English"
+        : language === "spa"
+          ? "Spanish"
+          : "Unknown",
+    ],
+  });
+  const base = contract.transport;
+  const transport: ArrTransport = async (url, ...args) => {
+    if (url.pathname.endsWith(`/${data.identity.fileId}`))
+      throw new SafeError("arr.http.404", "Arr returned HTTP 404");
+    return base(url, ...args);
+  };
+  vi.spyOn(transportModule, "arrTransport").mockImplementation(transport);
+  const client =
+    identity.source === "sonarr"
+      ? new SonarrClient("http://fixture.test", "key", transport)
+      : new RadarrClient("http://fixture.test", "key", transport);
+  return { ...next, client };
 }
 
-describe("manual Fix & Redownload through the durable job API", () => {
+describe("backup-first exact Arr DELETE state machine", () => {
   for (const source of ["sonarr", "radarr"] as const) {
-    it(`${source}: queues once, preserves quarantine, rejects then searches, verifies PASS and permits explicit cleanup`, async () => {
-      clearOperationFixtures();
-      const { scan, identity, mediaId } = await fixture(source);
+    it(`${source}: fresh scan, backup, exact DELETE, verified removal, blocklist, one search, fresh replacement PASS, explicit cleanup`, async () => {
+      const data = await fixture(source);
       const other = await fixture(source);
-      enable();
-      saveSettings({ safetyMode: "manual" });
-      const { calls } = wire(identity);
-      expect(manualRemediationControl(mediaId)).toMatchObject({
-        eligible: true,
-        state: "Ready",
-      });
-      expect(attentionRemediation(mediaId)?.mediaId).toBe(mediaId);
-      expect(attentionRemediation(scan.path)?.mediaId).toBe(mediaId);
-      const response = await requestRemediation(mediaId);
-      expect(response.status).toBe(202);
-      const queued = await response.json();
-      expect(queued.state).toBe("Fixing");
-      expect((await requestRemediation(other.mediaId)).status).toBe(400);
-      expect((await lstat(other.scan.path)).isFile()).toBe(true);
-      expect(await (await requestRemediation(mediaId)).json()).toEqual(queued);
-      expect(manualRemediationControl(mediaId).state).toBe("Fixing");
-      expect(calls).toHaveLength(0);
-      await runQueued(queued.id);
-      expect(manualRemediationControl(mediaId).state).toBe(
-        "Replacement pending",
+      const contract = wire(data, { rename: true });
+      const id = queueManualRemediation(data.mediaId, "fixture-admin").id!;
+      expect(manualRemediationControl(data.mediaId).state).toBe(
+        "Checking current file...",
       );
-      expect((await requestRemediation(other.mediaId)).status).toBe(400);
-      expect(
-        raw()
-          .prepare("SELECT 1 FROM operations WHERE file_id=?")
-          .get(other.identity.fileId),
-      ).toBeUndefined();
-      const op = operation(identity.fileId);
-      const markers = raw()
-        .prepare(
-          "SELECT step FROM operation_steps WHERE operation_id=? ORDER BY id",
-        )
-        .all(op.id) as { step: string }[];
-      expect(markers.map((row) => row.step)).toEqual([
+      expect(() =>
+        queueManualRemediation(other.mediaId, "fixture-admin"),
+      ).toThrow("only one item");
+      expect(queueManualRemediation(data.mediaId, "fixture-admin").id).toBe(id);
+      await run(id);
+      const op = operation(data.identity.fileId);
+      expect(op.state).toBe("pending");
+      expect(mutations(contract.calls).map((call) => call.path)).toEqual([
+        `/${source === "sonarr" ? "episodefile" : "moviefile"}/${data.identity.fileId}`,
+        "/history/failed/2",
+        "/command",
+      ]);
+      expect(markers(op.id)).toEqual([
         "mutation-started",
-        "quarantine-intent",
-        "quarantine",
-        "rescan-command-intent",
-        "rescan-command",
+        "backup-copy-intent",
+        "backup-copy",
+        "arr-delete-intent",
+        "arr-delete-verified",
         "history-failed-intent",
         "history-failed",
         "blocklist-verified",
         "replacement-search-intent",
         "replacement-search",
       ]);
-      const retained = quarantine(op.quarantine_id)!;
-      const bytes = await readFile(retained.quarantine_path);
-      await expect(lstat(scan.path)).rejects.toMatchObject({ code: "ENOENT" });
-      expect(
-        calls
-          .filter((call) => call.method === "POST")
-          .map((call) => [call.path, call.body]),
-      ).toEqual([
-        [
-          "/api/v3/command",
-          source === "sonarr"
-            ? { name: "RescanSeries", seriesId: identity.seriesId }
-            : { name: "RescanMovie", movieId: identity.entityId },
-        ],
-        ["/api/v3/history/failed/2", undefined],
-        [
-          "/api/v3/command",
-          source === "sonarr"
-            ? { name: "EpisodeSearch", episodeIds: [identity.entityId] }
-            : { name: "MoviesSearch", movieIds: [identity.entityId] },
-        ],
-      ]);
-      const before = calls.length;
-      expect(await (await requestRemediation(mediaId)).json()).toMatchObject({
-        state: "Replacement pending",
-      });
-      expect(calls).toHaveLength(before);
-      await expect(cleanupVerifiedQuarantine(retained.id)).rejects.toThrow(
+      expect(() =>
+        queueManualRemediation(other.mediaId, "fixture-admin"),
+      ).toThrow("only one item");
+      expect((await lstat(other.scan.path)).isFile()).toBe(true);
+      const backup = quarantine(op.quarantine_id!)!;
+      const bytes = await readFile(backup.quarantine_path);
+      await expect(cleanupVerifiedQuarantine(backup.id)).rejects.toThrow(
         "verified PASS",
       );
-      await verifyReplacement(
-        { ...scan, decision: "needs-analysis" },
-        { ...identity, fileId: identity.fileId + 10000 },
-      );
-      expect(operation(identity.fileId).state).toBe("pending");
-      await runProcess("ffmpeg", [
-        "-v",
-        "error",
-        "-f",
-        "lavfi",
-        "-i",
-        "sine=frequency=440:duration=1",
-        "-metadata:s:a:0",
-        "language=eng",
-        "-c:a",
-        "flac",
-        scan.path,
+      const next = await replacement(data);
+      await verifyReplacement(next.scan, next.identity, next.client);
+      expect(operation(data.identity.fileId).state).toBe("complete");
+      expect(await readFile(backup.quarantine_path)).toEqual(bytes);
+      await cleanupVerifiedQuarantine(backup.id);
+      expect(markers(op.id).slice(-2)).toEqual([
+        "cleanup-intent",
+        "cleanup-complete",
       ]);
-      const replacement = await scanFile(scan.path);
-      saveScan(replacement);
-      const next = { ...identity, fileId: identity.fileId + 10000 };
-      wire(next);
-      await verifyReplacement(replacement, next);
-      raw()
-        .prepare(
-          "UPDATE media_items SET decision='pass',fingerprint=?,identity=?,details=? WHERE id=?",
-        )
-        .run(
-          replacement.fingerprint,
-          String(next.fileId),
-          JSON.stringify(next),
-          mediaId,
-        );
-      expect(manualRemediationControl(mediaId)).toMatchObject({
-        state: "Complete",
-        eligible: false,
-      });
-      expect(await readFile(retained.quarantine_path)).toEqual(bytes);
-      const cleanup = await cleanupRequest(
-        new Request("http://fixture/api/quarantine", {
-          method: "DELETE",
-          body: JSON.stringify({ id: retained.id }),
-        }),
-      );
-      expect(cleanup.status).toBe(200);
-      expect(
-        raw()
-          .prepare(
-            "SELECT step FROM operation_steps WHERE operation_id=? AND step LIKE 'cleanup-%' ORDER BY id",
-          )
-          .all(op.id),
-      ).toEqual([{ step: "cleanup-intent" }, { step: "cleanup-complete" }]);
-      expect(quarantine(retained.id)?.state).toBe("cleaned");
-      await expect(lstat(retained.quarantine_path)).rejects.toMatchObject({
+      await expect(lstat(backup.quarantine_path)).rejects.toMatchObject({
         code: "ENOENT",
       });
-      expect((await lstat(scan.path)).isFile()).toBe(true);
-      await expect(cleanupVerifiedQuarantine(retained.id)).rejects.toThrow(
-        "Active quarantine",
-      );
+      expect((await lstat(data.scan.path)).isFile()).toBe(true);
     });
+    it(`${source}: old fingerprint is refreshed before mutation`, async () => {
+      const data = await fixture(source);
+      const old = { ...data.scan, fingerprint: "old-v1-fingerprint" };
+      saveScan(old);
+      raw()
+        .prepare("UPDATE media_items SET fingerprint=? WHERE id=?")
+        .run(old.fingerprint, data.mediaId);
+      wire(data);
+      await fix(data);
+      const evidence = JSON.parse(operation(data.identity.fileId).evidence);
+      expect(evidence.scan.fingerprint).toBe(data.scan.fingerprint);
+      expect(evidence.scan.fingerprint).not.toBe(old.fingerprint);
+      expect(evidence.scan.arrFileEvidence.languages).toEqual(["Spanish"]);
+    });
+    it.each(["pass", "needs-analysis"] as const)(
+      `${source}: fresh %s stops with zero mutation/reservation`,
+      async (decision) => {
+        const data = await fixture(source);
+        if (decision === "needs-analysis") await audio(data.scan.path, "und");
+        const { calls } = wire(data, {
+          languages: decision === "pass" ? ["English"] : [],
+        });
+        const id = await fix(data);
+        expect(mutations(calls)).toHaveLength(0);
+        expect(operation(data.identity.fileId)).toBeUndefined();
+        expect(
+          raw().prepare("SELECT count(*) n FROM retry_titles").get(),
+        ).toEqual({ n: 0 });
+        expect(jobQueue.get(id)?.currentItem).toBe(
+          decision === "pass"
+            ? "File now passes; no replacement needed."
+            : "Fresh scan needs analysis.",
+        );
+        expect(manualRemediationControl(data.mediaId).state).toBe(
+          decision === "pass"
+            ? "No fix needed — file now passes"
+            : "Fresh scan needs analysis",
+        );
+      },
+    );
+    it.each([
+      "404",
+      "uncertain",
+      "still-reported",
+      "path-remains",
+      "path-reported",
+    ] as const)(
+      `${source}: DELETE %s cannot search or replay`,
+      async (deleteOutcome) => {
+        const data = await fixture(source);
+        const { calls } = wire(data, { deleteOutcome });
+        await fix(data);
+        const op = operation(data.identity.fileId);
+        expect(op.state).toBe("needs-attention");
+        expect(markers(op.id)).toContain("arr-delete-intent");
+        expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(
+          1,
+        );
+        expect(calls.filter((call) => call.method === "POST")).toHaveLength(0);
+        expect(
+          (
+            await lstat(quarantine(op.quarantine_id!)!.quarantine_path)
+          ).isFile(),
+        ).toBe(true);
+        expect(
+          queueManualRemediation(data.mediaId, "fixture-admin").state,
+        ).toBe("Needs attention");
+        await expect(
+          queuePreMutationRetry(data.mediaId, op.id, "fixture-admin"),
+        ).rejects.toThrow("not proven");
+        expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(
+          1,
+        );
+      },
+    );
   }
-
-  it("requires admin/CSRF authorization and refuses browser-supplied evidence or identity", async () => {
-    const { mediaId } = await fixture();
-    enable();
-    vi.mocked(requireAdmin).mockRejectedValueOnce(new Error("CSRF required"));
-    expect((await requestRemediation(mediaId)).status).toBe(400);
-    expect(requireAdmin).toHaveBeenCalledWith(true);
-    expect(
-      (
-        await requestRemediation(mediaId, {
-          identity: {},
-          scan: { decision: "fail" },
-        })
-      ).status,
-    ).toBe(400);
-    expect(
-      jobQueue.list().filter((job) => job.state === "queued"),
-    ).toHaveLength(0);
+  it.each([
+    "backup",
+    "root",
+    "identity-before-delete",
+    "identity-before-action",
+    "shared",
+    "pack",
+    "blocklist-absent",
+    "blocklist-ambiguous",
+    "search-uncertain",
+  ])("fails closed: %s", async (failure) => {
+    const data = await fixture();
+    const options: Options = {
+      changeBeforeDelete: failure === "identity-before-delete",
+      shared: failure === "shared",
+      pack: failure === "pack",
+      blocklist:
+        failure === "blocklist-absent"
+          ? "absent"
+          : failure === "blocklist-ambiguous"
+            ? "ambiguous"
+            : undefined,
+      failSearch: failure === "search-uncertain",
+    };
+    const contract = wire(data, options);
+    if (failure === "identity-before-action") contract.file.id++;
+    if (failure === "backup")
+      vi.spyOn(quarantineModule, "preserveRecoveryCopy").mockRejectedValue(
+        new Error("Incomplete backup"),
+      );
+    if (failure === "root")
+      saveSettings({ quarantinePath: path.join(root, "missing") });
+    await fix(data);
+    if (
+      [
+        "backup",
+        "root",
+        "identity-before-delete",
+        "identity-before-action",
+        "shared",
+        "pack",
+      ].includes(failure)
+    )
+      expect(mutations(contract.calls)).toHaveLength(0);
+    if (failure === "root")
+      expect(
+        raw().prepare("SELECT count(*) n FROM retry_titles").get(),
+      ).toEqual({ n: 0 });
+    if (failure.startsWith("blocklist"))
+      expect(contract.calls.filter((c) => c.path === "/command")).toHaveLength(
+        0,
+      );
+    if (failure === "search-uncertain") {
+      expect(contract.calls.filter((c) => c.path === "/command")).toHaveLength(
+        1,
+      );
+      expect(
+        manualRemediationControl(data.mediaId).retryOperationId,
+      ).toBeUndefined();
+    }
   });
-
-  it("explains disabled gates and rechecks them after enqueue", async () => {
-    const { mediaId, scan, identity } = await fixture();
-    const { calls } = wire(identity);
-    expect(manualRemediationControl(mediaId).disabledReason).toContain(
-      "ALLOW_DESTRUCTIVE_ACTIONS",
+  it("safe pre-mutation retry preserves original evidence and refreshes the old fingerprint", async () => {
+    const data = await fixture();
+    wire(data, { badHistory: true });
+    await fix(data);
+    const op = operation(data.identity.fileId);
+    const evidence = op.evidence;
+    expect(preMutationRetryProof(op)).toBe(true);
+    wire(data);
+    const retry = await queuePreMutationRetry(
+      data.mediaId,
+      op.id,
+      "fixture-admin",
     );
-    expect((await requestRemediation(mediaId)).status).toBe(400);
-    process.env.ALLOW_DESTRUCTIVE_ACTIONS = "true";
-    expect(manualRemediationControl(mediaId).disabledReason).toContain(
-      "Automatic mode",
-    );
-    expect((await requestRemediation(mediaId)).status).toBe(400);
-    enable();
-    const queued = queueManualRemediation(mediaId, "fixture-admin");
-    process.env.ALLOW_DESTRUCTIVE_ACTIONS = "false";
-    await runQueued(queued.id!);
-    expect(manualRemediationControl(mediaId).state).toBe("Needs attention");
-    expect(calls).toHaveLength(0);
-    expect((await lstat(scan.path)).isFile()).toBe(true);
-  });
-
-  it("never remediates needs-analysis or stale/inconclusive evidence", async () => {
-    const { scan, mediaId } = await fixture();
-    enable();
-    saveScan({ ...scan, decision: "needs-analysis" });
-    expect((await requestRemediation(mediaId)).status).toBe(400);
-    expect(manualRemediationControl(mediaId).eligible).toBe(false);
-    saveScan({
-      ...scan,
-      tracks: scan.tracks.map((track) => ({ ...track, language: "und" })),
+    await run(retry.id);
+    expect(operation(data.identity.fileId)).toMatchObject({
+      id: op.id,
+      state: "pending",
+      evidence,
     });
-    expect((await requestRemediation(mediaId)).status).toBe(400);
-    expect((await lstat(scan.path)).isFile()).toBe(true);
   });
-
-  it("refuses persisted, queued and live exact-file identity mismatches", async () => {
-    const { scan, identity, mediaId } = await fixture();
-    enable();
-    raw()
-      .prepare("UPDATE media_items SET identity='999999' WHERE id=?")
-      .run(mediaId);
-    expect((await requestRemediation(mediaId)).status).toBe(400);
-    raw()
-      .prepare("UPDATE media_items SET identity=? WHERE id=?")
-      .run(String(identity.fileId), mediaId);
-    const queued = queueManualRemediation(mediaId, "fixture-admin");
-    raw()
-      .prepare("UPDATE media_items SET details=? WHERE id=?")
-      .run(JSON.stringify({ ...identity, downloadId: undefined }), mediaId);
-    await runQueued(queued.id!);
-    expect(jobQueue.get(queued.id!)?.state).toBe("needs-attention");
-    const fresh = await fixture();
-    const { calls } = wire(fresh.identity, { wrongFile: true });
-    const next = queueManualRemediation(fresh.mediaId, "fixture-admin");
-    await runQueued(next.id!);
-    expect(manualRemediationControl(fresh.mediaId).state).toBe(
-      "Needs attention",
+  it.each([
+    "pre-mutation",
+    "pending-wrong-language",
+    "pending-unknown",
+    "uncertain-search",
+    "uncertain-blocklist",
+  ])("fresh different identity reconciles %s conservatively", async (kind) => {
+    const data = await fixture();
+    wire(data, {
+      badHistory: kind === "pre-mutation",
+      failSearch: kind === "uncertain-search",
+    });
+    await fix(data);
+    const op = operation(data.identity.fileId);
+    if (kind === "uncertain-blocklist") {
+      raw()
+        .prepare(
+          "DELETE FROM operation_steps WHERE operation_id=? AND step IN ('history-failed','blocklist-verified','replacement-search-intent','replacement-search')",
+        )
+        .run(op.id);
+      raw()
+        .prepare("UPDATE operations SET state='needs-attention' WHERE id=?")
+        .run(op.id);
+    }
+    const next = await replacement(
+      data,
+      kind === "pending-unknown" ? "und" : "spa",
     );
-    expect(calls.every((call) => call.method === "GET")).toBe(true);
-    expect((await lstat(scan.path)).isFile()).toBe(true);
-    expect((await lstat(fresh.scan.path)).isFile()).toBe(true);
+    await verifyReplacement(next.scan, next.identity, next.client);
+    if (kind.startsWith("uncertain")) {
+      expect(operation(data.identity.fileId).state).toBe("needs-attention");
+      expect(() => requireManualAdmission()).toThrow();
+    } else {
+      expect(operation(data.identity.fileId).state).toBe("superseded");
+      expect(operation(data.identity.fileId).evidence).toBe(op.evidence);
+      expect(() => requireManualAdmission()).not.toThrow();
+      if (kind !== "pending-unknown") {
+        expect(manualRemediationControl(next.mediaId)).toMatchObject({
+          eligible: true,
+          state: "Old attempt superseded — current file can be fixed normally",
+        });
+        expect(
+          queueManualRemediation(next.mediaId, "fixture-admin").id,
+        ).toBeTruthy();
+      } else
+        expect(manualRemediationControl(next.mediaId).eligible).toBe(false);
+    }
   });
-
-  it("refuses revoked worker ownership before any destructive operation", async () => {
-    const { mediaId, identity, scan } = await fixture();
-    enable();
-    const { calls } = wire(identity);
-    const queued = queueManualRemediation(mediaId, "fixture-admin");
-    const job = jobQueue.claim()!;
-    jobQueue.cancel(queued.id!);
-    await executeJob(job, new AbortController().signal);
-    expect(calls).toHaveLength(0);
-    expect((await lstat(scan.path)).isFile()).toBe(true);
-  });
-
-  it("refuses a lost runtime lease", async () => {
-    const { mediaId } = await fixture();
-    enable();
-    const lease = new RuntimeLease(raw());
-    expect(lease.acquire()).toBe(true);
-    attachRuntimeLease(lease);
-    lease.release();
-    expect(() => queueManualRemediation(mediaId, "fixture-admin")).toThrow(
-      "lease",
+  it("missing current Arr identity or network uncertainty never supersedes an old attempt", async () => {
+    const data = await fixture();
+    wire(data, { badHistory: true });
+    await fix(data);
+    const next = await replacement(data);
+    vi.spyOn(next.client as SonarrClient, "findEpisodeFile").mockRejectedValue(
+      new Error("Unknown GET outcome"),
     );
-    // Leave a valid test-only runtime attached for the remainder of this file.
-    expect(lease.acquire()).toBe(true);
+    await expect(
+      verifyReplacement(next.scan, next.identity, next.client),
+    ).rejects.toThrow();
+    expect(operation(data.identity.fileId).state).toBe("needs-attention");
   });
-});
-
-async function completedFixture() {
-  const fixtureData = await fixture();
-  enable();
-  wire(fixtureData.identity);
-  const queued = queueManualRemediation(fixtureData.mediaId, "fixture-admin");
-  await runQueued(queued.id!);
-  const retained = quarantine(
-    operation(fixtureData.identity.fileId).quarantine_id,
-  )!;
-  await runProcess("ffmpeg", [
-    "-v",
-    "error",
-    "-f",
-    "lavfi",
-    "-i",
-    "sine=frequency=440:duration=1",
-    "-metadata:s:a:0",
-    "language=eng",
-    "-c:a",
-    "flac",
-    fixtureData.scan.path,
-  ]);
-  const replacement = await scanFile(fixtureData.scan.path);
-  saveScan(replacement);
-  const identity = {
-    ...fixtureData.identity,
-    fileId: fixtureData.identity.fileId + 10000,
-  };
-  wire(identity);
-  await verifyReplacement(replacement, identity);
-  return { retained, replacement, identity };
-}
-
-describe("verified quarantine cleanup refuses unsafe recovery loss", () => {
-  it("retains the failed copy when replacement evidence changes or the live Arr identity mismatches", async () => {
-    const { retained, replacement, identity } = await completedFixture();
-    wire(identity, { wrongFile: true });
-    await expect(cleanupVerifiedQuarantine(retained.id)).rejects.toThrow(
-      "identity",
-    );
-    wire(identity);
-    await writeFile(replacement.path, "changed replacement");
-    await expect(cleanupVerifiedQuarantine(retained.id)).rejects.toThrow(
-      "changed",
-    );
-    expect((await lstat(retained.quarantine_path)).isFile()).toBe(true);
-    expect(quarantine(retained.id)?.state).toBe("quarantined");
-  });
-  it("retains changed or symlinked quarantine copies and enforces disabled safety gates", async () => {
-    const { retained } = await completedFixture();
-    process.env.ALLOW_DESTRUCTIVE_ACTIONS = "false";
-    await expect(cleanupVerifiedQuarantine(retained.id)).rejects.toThrow(
+  it.each(["monitor", "disabled"])("retains %s safety gate", async (mode) => {
+    const data = await fixture();
+    const { calls } = wire(data);
+    if (mode === "monitor") saveSettings({ safetyMode: "monitor" });
+    else process.env.ALLOW_DESTRUCTIVE_ACTIONS = "false";
+    expect(() => queueManualRemediation(data.mediaId, "fixture-admin")).toThrow(
       "disabled",
     );
-    enable();
-    const saved = retained.quarantine_path + ".saved";
-    await rename(retained.quarantine_path, saved);
-    await symlink(saved, retained.quarantine_path);
-    await expect(cleanupVerifiedQuarantine(retained.id)).rejects.toThrow(
-      "Unsafe",
-    );
-    await rm(retained.quarantine_path);
-    await writeFile(retained.quarantine_path, "different copy");
-    await expect(cleanupVerifiedQuarantine(retained.id)).rejects.toThrow(
-      "changed",
-    );
-    expect((await lstat(saved)).isFile()).toBe(true);
-    expect(quarantine(retained.id)?.state).toBe("quarantined");
+    expect(calls).toHaveLength(0);
   });
-});
-
-describe("manual remediation retains language and retry guards", () => {
-  it("accepts conclusive exact Arr language failure even when ffprobe language is und", async () => {
-    const { scan, identity, mediaId } = await fixture("radarr", "und");
-    const evidence = {
-      source: identity.source,
-      entityId: identity.entityId,
-      fileId: identity.fileId,
-      arrPath: identity.arrPath,
-      languages: ["Spanish"],
-    };
-    const conclusive = await scanFile(scan.path, undefined, evidence);
-    expect(conclusive.decision).toBe("fail");
-    saveScan(conclusive);
+  it("needs-analysis rows cannot queue remediation", async () => {
+    const data = await fixture();
     raw()
-      .prepare("UPDATE media_items SET decision='fail' WHERE id=?")
-      .run(mediaId);
-    enable();
-    wire(identity, { languages: [{ id: 3, name: "Spanish" }] });
-    await runQueued(queueManualRemediation(mediaId, "fixture-admin").id!);
-    expect(operation(identity.fileId).state).toBe("pending");
-    expect(
-      (
-        await lstat(
-          quarantine(operation(identity.fileId).quarantine_id)!.quarantine_path,
-        )
-      ).isFile(),
-    ).toBe(true);
+      .prepare("UPDATE media_items SET decision='needs-analysis' WHERE id=?")
+      .run(data.mediaId);
+    expect(() => queueManualRemediation(data.mediaId, "fixture-admin")).toThrow(
+      "conclusive failed",
+    );
   });
-  it("refuses a formerly failed file whose current Arr language evidence now passes", async () => {
-    const { scan, identity, mediaId } = await fixture();
-    enable();
-    const { calls } = wire(identity, {
-      languages: [{ id: 1, name: "English" }],
-    });
-    await runQueued(queueManualRemediation(mediaId, "fixture-admin").id!);
-    expect(manualRemediationControl(mediaId).state).toBe("Needs attention");
-    expect(calls.every((call) => call.method === "GET")).toBe(true);
-    expect((await lstat(scan.path)).isFile()).toBe(true);
+  it("direct manual calls without an admitted job are refused", async () => {
+    const data = await fixture();
+    const { client, calls } = wire(data);
+    await expect(remediate(data.scan, data.identity, client)).rejects.toThrow(
+      "explicitly authorized",
+    );
+    expect(calls).toHaveLength(0);
   });
-  it.each(["ignored", "cooldown", "limit"])(
-    "does not bypass title %s protection",
-    async (guard) => {
-      const { scan, identity, mediaId } = await fixture();
-      enable();
-      raw()
-        .prepare("INSERT INTO retry_titles VALUES(?,?,?,?)")
-        .run(
-          `${identity.source}:${identity.entityId}`,
-          guard === "limit" ? 3 : 0,
-          guard === "cooldown" ? Date.now() + 60000 : 0,
-          guard === "ignored" ? 1 : 0,
-        );
-      const { calls } = wire(identity);
-      await runQueued(queueManualRemediation(mediaId, "fixture-admin").id!);
-      expect(operation(identity.fileId).state).toBe("needs-attention");
-      expect(calls.every((call) => call.method === "GET")).toBe(true);
-      expect((await lstat(scan.path)).isFile()).toBe(true);
-    },
-  );
+  it("backup copy is exclusive and leaves the source intact", async () => {
+    const data = await fixture();
+    const id = await quarantineModule.preserveRecoveryCopy(
+      data.scan,
+      new AbortController().signal,
+      () => {},
+    );
+    expect(await readFile(quarantine(id)!.quarantine_path)).toEqual(
+      await readFile(data.scan.path),
+    );
+    await expect(
+      quarantineModule.preserveRecoveryCopy(
+        data.scan,
+        new AbortController().signal,
+        () => {},
+      ),
+    ).rejects.toThrow("already exists");
+    const original = await readFile(data.scan.path);
+    const backup = quarantine(id)!.quarantine_path;
+    const activeStat = await lstat(data.scan.path),
+      backupStat = await lstat(backup);
+    expect([backupStat.dev, backupStat.ino]).not.toEqual([
+      activeStat.dev,
+      activeStat.ino,
+    ]);
+    await writeFile(data.scan.path, "in-place external change");
+    expect(await readFile(backup)).toEqual(original);
+  });
 });
 
-async function readFailure(source: "sonarr" | "radarr" = "sonarr") {
-  const data = await fixture(source);
-  enable();
-  wire(data.identity, { badHistory: true });
-  await runQueued(queueManualRemediation(data.mediaId, "fixture-admin").id!);
-  expect(operation(data.identity.fileId).state).toBe("needs-attention");
+async function readFailure() {
+  const data = await fixture();
+  wire(data, { badHistory: true });
+  await fix(data);
   return { ...data, op: operation(data.identity.fileId) };
 }
-
-describe("explicit pre-mutation retry", () => {
-  for (const source of ["sonarr", "radarr"] as const) {
-    it(`${source}: reuses the failed operation only after explicit authorization and never duplicates mutations`, async () => {
-      clearOperationFixtures();
-      const { identity, mediaId, op, scan } = await readFailure(source);
-      saveSettings({ safetyMode: "manual" });
-      expect(manualRemediationControl(mediaId)).toMatchObject({
-        state: "Needs attention",
-        retryOperationId: op.id,
-        reason: `${source === "sonarr" ? "Sonarr" : "Radarr"} history response could not be parsed`,
-      });
-      const { calls } = wire(identity);
-      // The normal action still refuses replay.
-      expect(queueManualRemediation(mediaId, "fixture-admin").state).toBe(
-        "Needs attention",
+it.each([
+  "backup-copy-intent",
+  "backup-copy",
+  "arr-delete-intent",
+  "arr-delete-verified",
+  "quarantine",
+  "rescan-command",
+  "history-failed",
+  "replacement-search",
+  "mutation-started",
+  "quarantine-intent",
+  "rescan-command-intent",
+  "history-failed-intent",
+  "replacement-search-intent",
+  "cleanup-intent",
+  "unknown-step",
+  "quarantine-id",
+  "release-key",
+  "reservation",
+  "orphan-quarantine",
+  "no-proof",
+])("refuses unsafe or uncertain history: %s", async (blocker) => {
+  const { identity, mediaId, op, scan } = await readFailure();
+  if (blocker === "quarantine-id")
+    raw()
+      .prepare("UPDATE operations SET quarantine_id='copy' WHERE id=?")
+      .run(op.id);
+  else if (blocker === "release-key")
+    raw()
+      .prepare("UPDATE operations SET release_key='reserved' WHERE id=?")
+      .run(op.id);
+  else if (blocker === "reservation")
+    raw()
+      .prepare("INSERT INTO retry_titles VALUES(?,1,0,0)")
+      .run(`${identity.source}:${identity.entityId}`);
+  else if (blocker === "orphan-quarantine")
+    raw()
+      .prepare("INSERT INTO quarantines VALUES(?,?,?,?,?,?,?)")
+      .run(
+        `orphan-${op.id}`,
+        scan.path,
+        "/unused",
+        "{}",
+        "needs-attention",
+        "fixture",
+        null,
       );
-      expect(calls).toHaveLength(0);
-      const retry = await (
-        await requestRemediation(mediaId, { retryOperationId: op.id })
-      ).json();
-      expect(retry.state).toBe("Fixing");
-      expect(
-        await (
-          await requestRemediation(mediaId, { retryOperationId: op.id })
-        ).json(),
-      ).toEqual(retry);
-      await runQueued(retry.id);
-      expect(operation(identity.fileId)).toMatchObject({
-        id: op.id,
-        state: "pending",
-      });
-      expect(
-        calls.filter((call) => call.method === "POST").map((call) => call.path),
-      ).toEqual([
-        "/api/v3/command",
-        "/api/v3/history/failed/2",
-        "/api/v3/command",
-      ]);
-      expect(
-        raw()
-          .prepare(
-            "SELECT COUNT(*) n FROM operations WHERE source=? AND entity_id=?",
-          )
-          .get(source, identity.entityId),
-      ).toEqual({ n: 1 });
-      expect(
-        manualRemediationControl(mediaId).retryOperationId,
-      ).toBeUndefined();
-      await expect(
-        queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
-      ).rejects.toThrow("not proven");
-      await expect(lstat(scan.path)).rejects.toMatchObject({ code: "ENOENT" });
-    });
-  }
-  it("recognizes the legacy nullable-metadata parser failure without clearing old evidence", async () => {
-    const { identity, mediaId, op } = await readFailure();
+  else if (blocker === "no-proof")
     raw()
       .prepare("DELETE FROM operation_steps WHERE operation_id=?")
       .run(op.id);
-    const legacy = JSON.stringify(
-      ["imdbId", "releaseGroup"].map((field) => ({
-        code: "invalid_type",
-        expected: "string",
-        received: "null",
-        path: ["records", 0, "data", field],
-        message: "Expected string, received null",
-      })),
+  else
+    raw()
+      .prepare(
+        "INSERT INTO operation_steps(operation_id,step,result,created_at) VALUES(?,?,?,?)",
+      )
+      .run(op.id, blocker, "{}", "fixture");
+  const { calls } = wire({ identity, mediaId, scan });
+  expect(manualRemediationControl(mediaId).retryOperationId).toBeUndefined();
+  await expect(
+    queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
+  ).rejects.toThrow("not proven");
+  expect(calls).toHaveLength(0);
+  expect((await lstat(scan.path)).isFile()).toBe(true);
+});
+it("persists per-release aliases, title limits, backoff and deliberate reset", () => {
+  expect(
+    reserveReplacement("fixture:title", "release-a", 0, ["download-a"]),
+  ).toBe(1);
+  expect(() =>
+    reserveReplacement("fixture:title", "release-a", 99999999, [
+      "new-download",
+    ]),
+  ).toThrow("same rejected");
+  expect(() =>
+    reserveReplacement("fixture:title", "renamed-release", 99999999, [
+      "download-a",
+    ]),
+  ).toThrow("same rejected");
+  expect(() => reserveReplacement("fixture:title", "release-b", 1)).toThrow(
+    "cooldown",
+  );
+  expect(reserveReplacement("fixture:title", "release-b", 60000)).toBe(2);
+  expect(reserveReplacement("fixture:title", "release-c", 180000)).toBe(3);
+  expect(() =>
+    reserveReplacement("fixture:title", "release-d", 99999999),
+  ).toThrow("retry limit");
+  resetReplacement("fixture:title", "fixture-admin");
+  expect(reserveReplacement("fixture:title", "release-d", 99999999)).toBe(1);
+});
+it.each(["ignored", "cooldown", "limit"])(
+  "does not bypass title %s protection",
+  async (guard) => {
+    const { scan, identity, mediaId } = await fixture();
+    raw()
+      .prepare("INSERT INTO retry_titles VALUES(?,?,?,?)")
+      .run(
+        `${identity.source}:${identity.entityId}`,
+        guard === "limit" ? 3 : 0,
+        guard === "cooldown" ? Date.now() + 60000 : 0,
+        guard === "ignored" ? 1 : 0,
+      );
+    const { calls } = wire({ scan, identity, mediaId });
+    await run(queueManualRemediation(mediaId, "fixture-admin").id!);
+    expect(operation(identity.fileId).state).toBe("needs-attention");
+    expect(calls.every((call) => call.method === "GET")).toBe(true);
+    expect((await lstat(scan.path)).isFile()).toBe(true);
+  },
+);
+it.each(["disabled", "monitor", "cancelled", "runtime"])(
+  "rechecks %s authorization after admission",
+  async (gate) => {
+    const data = await fixture();
+    const { calls } = wire(data);
+    const { id } = queueManualRemediation(data.mediaId, "fixture-admin");
+    const job = jobQueue.claim()!;
+    if (gate === "disabled") process.env.ALLOW_DESTRUCTIVE_ACTIONS = "false";
+    if (gate === "monitor") saveSettings({ safetyMode: "monitor" });
+    if (gate === "cancelled") jobQueue.cancel(id!);
+    if (gate === "runtime")
+      vi.spyOn(runtimeModule, "requireRuntimeOwnership").mockImplementation(
+        () => {
+          throw new Error("Runtime lease lost");
+        },
+      );
+    await executeJob(job, new AbortController().signal);
+    expect(mutations(calls)).toHaveLength(0);
+    expect(operation(data.identity.fileId)).toBeUndefined();
+  },
+);
+it("requires admin authorization and refuses request-supplied identity/evidence", async () => {
+  const data = await fixture();
+  const request = (extra = {}) =>
+    POST(
+      new Request("http://fixture/api/jobs", {
+        method: "POST",
+        body: JSON.stringify({
+          kind: "remediate",
+          mediaId: data.mediaId,
+          ...extra,
+        }),
+      }),
     );
+  expect(
+    (await request({ identity: data.identity, scan: data.scan })).status,
+  ).toBe(400);
+  vi.mocked(requireAdmin).mockRejectedValueOnce(new Error("Unauthorized"));
+  expect((await request()).status).not.toBe(202);
+  expect(jobQueue.list()).toHaveLength(0);
+});
+it("does not automatically loop on later scans of a wrong-language replacement", async () => {
+  const data = await fixture();
+  wire(data);
+  await fix(data);
+  const next = await replacement(data, "spa");
+  expect(await verifyReplacement(next.scan, next.identity, next.client)).toBe(
+    true,
+  );
+  saveSettings({ safetyMode: "automatic" });
+  const request = vi.spyOn(next.client as SonarrClient, "findEpisodeFile");
+  expect(await verifyReplacement(next.scan, next.identity, next.client)).toBe(
+    true,
+  );
+  expect(request).not.toHaveBeenCalled();
+  expect(raw().prepare("SELECT count(*) n FROM operations").get()).toEqual({
+    n: 1,
+  });
+});
+it("recovery backup never attempts a hardlink, even on the same filesystem", async () => {
+  const data = await fixture();
+  const target = path.join(destination, "independent-copy");
+  const linkAttempt = vi.fn(async () => {
+    throw new Error("Hardlink forbidden");
+  });
+  await quarantineModule.moveExclusive(
+    data.scan.path,
+    target,
+    linkAttempt,
+    () => {},
+    undefined,
+    true,
+  );
+  expect(linkAttempt).not.toHaveBeenCalled();
+  expect(await readFile(target)).toEqual(await readFile(data.scan.path));
+});
+it.each([
+  "replacement",
+  "identity",
+  "backup-symlink",
+  "backup-changed",
+  "disabled",
+])("explicit cleanup refuses unsafe %s", async (kind) => {
+  const data = await fixture();
+  wire(data);
+  await fix(data);
+  const op = operation(data.identity.fileId);
+  const kept = quarantine(op.quarantine_id!)!;
+  const next = await replacement(data);
+  await verifyReplacement(next.scan, next.identity, next.client);
+  if (kind === "replacement")
+    await writeFile(next.scan.path, "changed replacement");
+  if (kind === "identity") {
+    const contract = wire(next);
+    contract.file.id++;
+  }
+  if (kind === "backup-symlink") {
+    await rename(kept.quarantine_path, kept.quarantine_path + ".saved");
+    await symlink(kept.quarantine_path + ".saved", kept.quarantine_path);
+  }
+  if (kind === "backup-changed")
+    await writeFile(kept.quarantine_path, "changed backup");
+  if (kind === "disabled") process.env.ALLOW_DESTRUCTIVE_ACTIONS = "false";
+  await expect(cleanupVerifiedQuarantine(kept.id)).rejects.toThrow();
+  expect(quarantine(kept.id)?.state).toBe("quarantined");
+  expect(await lstat(kept.quarantine_path)).toBeTruthy();
+});
+
+const legacy =
+  "Disable Arr automatic failed-download redownload before using Automatic mode";
+async function legacyFailure() {
+  const data = await readFailure();
+  raw()
+    .prepare("DELETE FROM operation_steps WHERE operation_id=?")
+    .run(data.op.id);
+  raw()
+    .prepare("UPDATE operations SET error=? WHERE id=?")
+    .run(legacy, data.op.id);
+  return data;
+}
+it("exact legacy refusal no longer blocks admission and can retry without erasing evidence", async () => {
+  const { identity, mediaId, op } = await legacyFailure();
+  const evidence = raw()
+    .prepare("SELECT evidence FROM operations WHERE id=?")
+    .get(op.id);
+  expect(() => requireManualAdmission()).not.toThrow();
+  expect(manualRemediationControl(mediaId).retryOperationId).toBe(op.id);
+  wire({ identity, mediaId, scan: JSON.parse(op.evidence).scan });
+  await run((await queuePreMutationRetry(mediaId, op.id, "fixture-admin")).id);
+  expect(operation(identity.fileId).state).toBe("pending");
+  expect(
+    raw().prepare("SELECT evidence FROM operations WHERE id=?").get(op.id),
+  ).toEqual(evidence);
+  expect(() => requireManualAdmission()).toThrow("only one item");
+});
+it.each([
+  "different-error",
+  "empty-release-key",
+  "empty-quarantine-id",
+  "wrong-state",
+  "release-key",
+  "quarantine-id",
+  "quarantine-intent",
+  "rescan-command-intent",
+  "history-failed-intent",
+  "replacement-search-intent",
+  "mutation-started",
+  "unknown-step",
+  "title-reservation",
+  "release-reservation",
+  "orphan-quarantine",
+])("legacy signature still blocks with %s", async (blocker) => {
+  const { identity, op, scan } = await legacyFailure();
+  if (blocker === "empty-release-key")
+    raw().prepare("UPDATE operations SET release_key='' WHERE id=?").run(op.id);
+  else if (blocker === "empty-quarantine-id")
+    raw()
+      .prepare("UPDATE operations SET quarantine_id='' WHERE id=?")
+      .run(op.id);
+  else if (blocker === "different-error")
     raw()
       .prepare("UPDATE operations SET error=? WHERE id=?")
-      .run(legacy, op.id);
-    expect(manualRemediationControl(mediaId).retryOperationId).toBe(op.id);
-    const oldEvidence = raw()
-      .prepare("SELECT evidence FROM operations WHERE id=?")
-      .get(op.id);
-    wire(identity);
-    await runQueued(
-      (await queuePreMutationRetry(mediaId, op.id, "fixture-admin")).id,
+      .run(legacy + ".", op.id);
+  else if (blocker === "wrong-state")
+    raw()
+      .prepare("UPDATE operations SET state='pending' WHERE id=?")
+      .run(op.id);
+  else if (blocker === "release-key")
+    raw()
+      .prepare("UPDATE operations SET release_key='reserved' WHERE id=?")
+      .run(op.id);
+  else if (blocker === "quarantine-id")
+    raw()
+      .prepare("UPDATE operations SET quarantine_id='copy' WHERE id=?")
+      .run(op.id);
+  else if (blocker === "title-reservation")
+    raw()
+      .prepare("INSERT INTO retry_titles VALUES(?,1,0,0)")
+      .run(`${identity.source}:${identity.entityId}`);
+  else if (blocker === "release-reservation") {
+    reserveReplacement(
+      `${identity.source}:${identity.entityId}`,
+      `legacy-release-${identity.entityId}`,
+      Date.now(),
     );
+    raw()
+      .prepare("DELETE FROM retry_titles WHERE identity=?")
+      .run(`${identity.source}:${identity.entityId}`);
+  } else if (blocker === "orphan-quarantine")
+    raw()
+      .prepare("INSERT INTO quarantines VALUES(?,?,?,?,?,?,?)")
+      .run(
+        `legacy-${op.id}`,
+        scan.path,
+        "/unused",
+        "{}",
+        "needs-attention",
+        "fixture",
+        null,
+      );
+  else
+    raw()
+      .prepare(
+        "INSERT INTO operation_steps(operation_id,step,result,created_at) VALUES(?,?,?,?)",
+      )
+      .run(op.id, blocker, "{}", "fixture");
+  const stored = raw()
+    .prepare("SELECT * FROM operations WHERE id=?")
+    .get(op.id) as RetryOperation;
+  expect(preMutationRetryProof(stored)).toBe(false);
+  expect(() => requireManualAdmission()).toThrow("only one item");
+});
+it("supersedes a conclusively resolved unknown DELETE after an external replacement, retaining explicit cleanup", async () => {
+  const data = await fixture();
+  wire(data, { deleteOutcome: "uncertain" });
+  await fix(data);
+  const op = operation(data.identity.fileId);
+  const backup = quarantine(op.quarantine_id!)!;
+  const next = await replacement(data);
+  await verifyReplacement(next.scan, next.identity, next.client);
+  expect(operation(data.identity.fileId).state).toBe("superseded");
+  expect(() => requireManualAdmission()).not.toThrow();
+  expect(await lstat(backup.quarantine_path)).toBeTruthy();
+  expect(markers(op.id)).toContain("verified-replacement");
+  await cleanupVerifiedQuarantine(backup.id);
+  await expect(lstat(backup.quarantine_path)).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+});
+it("rechecks the retained recovery object before Arr DELETE", async () => {
+  const data = await fixture();
+  const { calls } = wire(data);
+  vi.spyOn(quarantineModule, "verifyRecoveryCopy").mockRejectedValue(
+    new Error("Verified recovery copy changed"),
+  );
+  await fix(data);
+  expect(mutations(calls)).toHaveLength(0);
+  expect(markers(operation(data.identity.fileId).id)).not.toContain(
+    "arr-delete-intent",
+  );
+});
+
+it.each(["sonarr", "radarr"] as const)(
+  "%s import job freshly verifies the replacement and refreshes cached current identity",
+  async (source) => {
+    const data = await fixture(source);
+    wire(data);
+    await fix(data);
+    const next = await replacement(data);
+    raw()
+      .prepare("UPDATE media_items SET identity=?,details=? WHERE id=?")
+      .run(
+        String(data.identity.fileId),
+        JSON.stringify(data.identity),
+        data.mediaId,
+      );
+    const queued = jobQueue.enqueue("scan-file", { ...next.identity });
+    await run(queued.id);
+    expect(operation(data.identity.fileId).state).toBe("complete");
     expect(
-      raw().prepare("SELECT evidence FROM operations WHERE id=?").get(op.id),
-    ).toEqual(oldEvidence);
-    expect(operation(identity.fileId).state).toBe("pending");
+      raw()
+        .prepare("SELECT identity,decision FROM media_items WHERE id=?")
+        .get(data.mediaId),
+    ).toEqual({ identity: String(next.identity.fileId), decision: "pass" });
+    expect(
+      quarantine(operation(data.identity.fileId).quarantine_id!)?.state,
+    ).toBe("quarantined");
+  },
+);
+
+it("a same-size copy with a mismatched SHA-256 readback cannot authorize Arr DELETE", async () => {
+  const data = await fixture();
+  const { calls } = wire(data);
+  const originalOpen = fsPromises.open;
+  const synced = vi.fn();
+  vi.spyOn(fsPromises, "open").mockImplementation(async (...args) => {
+    const handle = await originalOpen(...args);
+    if (args[1] === "wx+") {
+      const sync = handle.sync.bind(handle);
+      vi.spyOn(handle, "sync").mockImplementationOnce(async () => {
+        await handle.write(Buffer.from([255]), 0, 1, 0);
+        await sync();
+        synced();
+      });
+    }
+    return handle;
   });
-  it.each([
-    "quarantine",
-    "rescan-command",
-    "history-failed",
-    "replacement-search",
-    "mutation-started",
-    "quarantine-intent",
-    "rescan-command-intent",
-    "history-failed-intent",
-    "replacement-search-intent",
-    "cleanup-intent",
-    "unknown-step",
-    "quarantine-id",
-    "release-key",
-    "reservation",
-    "orphan-quarantine",
-    "no-proof",
-  ])("refuses unsafe or uncertain history: %s", async (blocker) => {
-    const { identity, mediaId, op, scan } = await readFailure();
-    if (blocker === "quarantine-id")
-      raw()
-        .prepare("UPDATE operations SET quarantine_id='copy' WHERE id=?")
-        .run(op.id);
-    else if (blocker === "release-key")
-      raw()
-        .prepare("UPDATE operations SET release_key='reserved' WHERE id=?")
-        .run(op.id);
-    else if (blocker === "reservation")
-      raw()
-        .prepare("INSERT INTO retry_titles VALUES(?,1,0,0)")
-        .run(`${identity.source}:${identity.entityId}`);
-    else if (blocker === "orphan-quarantine")
-      raw()
-        .prepare("INSERT INTO quarantines VALUES(?,?,?,?,?,?,?)")
-        .run(
-          `orphan-${op.id}`,
-          scan.path,
-          "/unused",
-          "{}",
-          "needs-attention",
-          "fixture",
-          null,
-        );
-    else if (blocker === "no-proof")
-      raw()
-        .prepare("DELETE FROM operation_steps WHERE operation_id=?")
-        .run(op.id);
-    else
-      raw()
-        .prepare(
-          "INSERT INTO operation_steps(operation_id,step,result,created_at) VALUES(?,?,?,?)",
-        )
-        .run(op.id, blocker, "{}", "fixture");
-    const { calls } = wire(identity);
-    expect(manualRemediationControl(mediaId).retryOperationId).toBeUndefined();
-    await expect(
-      queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
-    ).rejects.toThrow("not proven");
-    expect(calls).toHaveLength(0);
-    expect((await lstat(scan.path)).isFile()).toBe(true);
-  });
-  it("rechecks safety, current file evidence and live exact identity on explicit retry", async () => {
-    const { identity, mediaId, op, scan } = await readFailure();
-    process.env.ALLOW_DESTRUCTIVE_ACTIONS = "false";
-    await expect(
-      queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
-    ).rejects.toThrow("disabled");
-    enable();
-    wire(identity, { wrongFile: true });
-    await expect(
-      queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
-    ).rejects.toThrow("identity");
-    wire(identity);
-    saveScan({ ...scan, decision: "needs-analysis" });
-    expect(manualRemediationControl(mediaId).eligible).toBe(false);
-    await expect(
-      queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
-    ).rejects.toThrow("evidence");
-    saveScan(scan);
-    await writeFile(scan.path, "changed active file");
-    await expect(
-      queuePreMutationRetry(mediaId, op.id, "fixture-admin"),
-    ).rejects.toThrow("changed");
-  });
-  it.each(["path", "download", "identity"] as const)(
-    "never relaxes history %s correlation",
-    async (wrongHistory) => {
-      const { identity, mediaId, scan } = await fixture("sonarr");
-      enable();
-      const { calls } = wire(identity, { wrongHistory });
-      await runQueued(queueManualRemediation(mediaId, "fixture-admin").id!);
-      expect(operation(identity.fileId).state).toBe("needs-attention");
-      expect(calls.every((call) => call.method === "GET")).toBe(true);
-      expect((await lstat(scan.path)).isFile()).toBe(true);
+  await fix(data);
+  expect(synced).toHaveBeenCalledOnce();
+  expect(mutations(calls)).toHaveLength(0);
+  expect(markers(operation(data.identity.fileId).id)).not.toContain(
+    "arr-delete-intent",
+  );
+  expect((await lstat(data.scan.path)).isFile()).toBe(true);
+});
+it("source identity is revalidated after backup and before Arr DELETE", async () => {
+  const data = await fixture();
+  const { calls } = wire(data);
+  const verify = quarantineModule.verifyRecoveryCopy;
+  vi.spyOn(quarantineModule, "verifyRecoveryCopy").mockImplementationOnce(
+    async (id) => {
+      await rename(data.scan.path, data.scan.path + ".old");
+      await fsPromises.copyFile(data.scan.path + ".old", data.scan.path);
+      await verify(id);
     },
   );
-  it("never renders arbitrary stored errors as a visible remediation reason", async () => {
-    const { mediaId, op } = await readFailure();
-    raw()
-      .prepare("UPDATE operations SET error=? WHERE id=?")
-      .run("secret-api-key huge-server-body".repeat(500), op.id);
-    const reason = manualRemediationControl(mediaId).reason!;
-    expect(reason.length).toBeLessThan(200);
-    expect(reason).not.toContain("secret-api-key");
-  });
-});
-
-function clearOperationFixtures() {
-  // This test file shares one isolated database; manual admission is global.
-  raw().exec(
-    "DELETE FROM operation_steps; DELETE FROM operations; DELETE FROM jobs;",
-  );
-}
-
-describe("realistic scoped history and blocklist contracts", () => {
-  for (const source of ["sonarr", "radarr"] as const) {
-    it.each([
-      "missing-path",
-      "missing-download",
-      "blank-download",
-      "repeated-import",
-      "conflicting-import",
-      "conflicting-grab",
-      "shared-download",
-      "unsafe-path",
-      "no-grab-metadata",
-    ] as const)(
-      `${source}: refuses %s before mutation`,
-      async (historyCase) => {
-        const { scan, identity } = await fixture(source);
-        enable();
-        const { client, calls } = mock(identity, { historyCase });
-        expect(await remediate(scan, identity, client)).toBe("needs-attention");
-        expect(calls.every((call) => call.method === "GET")).toBe(true);
-        expect((await lstat(scan.path)).isFile()).toBe(true);
-      },
-    );
-    it.each(["repeated-grab"] as const)(
-      `${source}: identical repeated release evidence remains correlated (%s)`,
-      async (historyCase) => {
-        const { scan, identity } = await fixture(source);
-        enable();
-        expect(
-          await remediate(
-            scan,
-            identity,
-            mock(identity, { historyCase }).client,
-          ),
-        ).toBe("pending");
-      },
-    );
-    it.each([
-      "absent",
-      "ambiguous",
-      "wrong-title",
-      "wrong-identity",
-      "wrong-protocol",
-      "wrong-indexer",
-      "old-only",
-      "unavailable",
-    ] as const)(
-      `${source}: no search when new blocklist proof is %s`,
-      async (blocklistCase) => {
-        const { scan, identity, mediaId } = await fixture(source);
-        enable();
-        const { client, calls } = mock(identity, { blocklistCase });
-        expect(await remediate(scan, identity, client)).toBe("needs-attention");
-        expect(
-          calls.filter((call) => call.path.includes("/history/failed/")),
-        ).toHaveLength(1);
-        expect(
-          calls.filter((call) =>
-            (call.body as { name?: string })?.name?.endsWith("Search"),
-          ),
-        ).toHaveLength(0);
-        expect(
-          manualRemediationControl(mediaId).retryOperationId,
-        ).toBeUndefined();
-        expect(
-          (
-            await lstat(
-              quarantine(operation(identity.fileId).quarantine_id)!
-                .quarantine_path,
-            )
-          ).isFile(),
-        ).toBe(true);
-      },
-    );
-  }
-  it("Manual mode refuses a direct remediation call without the admitted durable job", async () => {
-    clearOperationFixtures();
-    const { scan, identity } = await fixture();
-    enable();
-    saveSettings({ safetyMode: "manual" });
-    const { client, calls } = mock(identity);
-    await expect(remediate(scan, identity, client)).rejects.toThrow(
-      "explicitly authorized job",
-    );
-    expect(calls).toHaveLength(0);
-  });
-});
-
-describe("rename failure retry and legacy admission", () => {
-  for (const source of ["sonarr", "radarr"] as const) {
-    it(`${source}: retries the old pre-mutation rename failure without replacing its evidence`, async () => {
-      clearOperationFixtures();
-      const { identity, mediaId, scan } = await fixture(source);
-      enable();
-      saveSettings({ safetyMode: "manual" });
-      wire(identity, { renamed: true });
-      // Reproduce v0.2.7's direct-only correlation failure against unchanged
-      // Arr rename history, then restore the corrected correlation implementation.
-      const oldRule = vi
-        .spyOn(historyModule, "correlateRelease")
-        .mockRejectedValueOnce(new Error("Ambiguous imported release history"));
-      await runQueued(queueManualRemediation(mediaId, "fixture-admin").id!);
-      oldRule.mockRestore();
-      const op = operation(identity.fileId);
-      const original = raw()
-        .prepare("SELECT evidence,error FROM operations WHERE id=?")
-        .get(op.id);
-      expect(op.state).toBe("needs-attention");
-      expect(
-        raw()
-          .prepare("SELECT step FROM operation_steps WHERE operation_id=?")
-          .all(op.id),
-      ).toEqual([{ step: "pre-mutation-failure" }]);
-      expect(manualRemediationControl(mediaId).retryOperationId).toBe(op.id);
-      const { calls } = wire(identity, { renamed: true });
-      await runQueued(
-        (await queuePreMutationRetry(mediaId, op.id, "fixture-admin")).id,
-      );
-      expect(operation(identity.fileId)).toMatchObject({
-        id: op.id,
-        state: "pending",
-      });
-      expect(
-        raw()
-          .prepare("SELECT evidence,error FROM operations WHERE id=?")
-          .get(op.id),
-      ).toEqual(original);
-      expect(
-        calls.filter((c) =>
-          (c.body as { name?: string })?.name?.endsWith("Search"),
-        ),
-      ).toHaveLength(1);
-      await expect(lstat(scan.path)).rejects.toMatchObject({ code: "ENOENT" });
-      expect(() => requireManualAdmission()).toThrow("only one item");
-    });
-  }
-  const legacy =
-    "Disable Arr automatic failed-download redownload before using Automatic mode";
-  async function legacyFailure() {
-    clearOperationFixtures();
-    const data = await readFailure();
-    raw()
-      .prepare("DELETE FROM operation_steps WHERE operation_id=?")
-      .run(data.op.id);
-    raw()
-      .prepare("UPDATE operations SET error=? WHERE id=?")
-      .run(legacy, data.op.id);
-    saveSettings({ safetyMode: "manual" });
-    return data;
-  }
-  it("exact legacy refusal no longer blocks admission and can retry without erasing evidence", async () => {
-    const { identity, mediaId, op } = await legacyFailure();
-    const evidence = raw()
-      .prepare("SELECT evidence FROM operations WHERE id=?")
-      .get(op.id);
-    expect(() => requireManualAdmission()).not.toThrow();
-    expect(manualRemediationControl(mediaId).retryOperationId).toBe(op.id);
-    wire(identity);
-    await runQueued(
-      (await queuePreMutationRetry(mediaId, op.id, "fixture-admin")).id,
-    );
-    expect(operation(identity.fileId).state).toBe("pending");
-    expect(
-      raw().prepare("SELECT evidence FROM operations WHERE id=?").get(op.id),
-    ).toEqual(evidence);
-    expect(() => requireManualAdmission()).toThrow("only one item");
-  });
-  it.each([
-    "different-error",
-    "empty-release-key",
-    "empty-quarantine-id",
-    "wrong-state",
-    "release-key",
-    "quarantine-id",
-    "quarantine-intent",
-    "rescan-command-intent",
-    "history-failed-intent",
-    "replacement-search-intent",
-    "mutation-started",
-    "unknown-step",
-    "title-reservation",
-    "release-reservation",
-    "orphan-quarantine",
-  ])("legacy signature still blocks with %s", async (blocker) => {
-    const { identity, op, scan } = await legacyFailure();
-    if (blocker === "empty-release-key")
-      raw()
-        .prepare("UPDATE operations SET release_key='' WHERE id=?")
-        .run(op.id);
-    else if (blocker === "empty-quarantine-id")
-      raw()
-        .prepare("UPDATE operations SET quarantine_id='' WHERE id=?")
-        .run(op.id);
-    else if (blocker === "different-error")
-      raw()
-        .prepare("UPDATE operations SET error=? WHERE id=?")
-        .run(legacy + ".", op.id);
-    else if (blocker === "wrong-state")
-      raw()
-        .prepare("UPDATE operations SET state='pending' WHERE id=?")
-        .run(op.id);
-    else if (blocker === "release-key")
-      raw()
-        .prepare("UPDATE operations SET release_key='reserved' WHERE id=?")
-        .run(op.id);
-    else if (blocker === "quarantine-id")
-      raw()
-        .prepare("UPDATE operations SET quarantine_id='copy' WHERE id=?")
-        .run(op.id);
-    else if (blocker === "title-reservation")
-      raw()
-        .prepare("INSERT INTO retry_titles VALUES(?,1,0,0)")
-        .run(`${identity.source}:${identity.entityId}`);
-    else if (blocker === "release-reservation") {
-      reserveReplacement(
-        `${identity.source}:${identity.entityId}`,
-        `legacy-release-${identity.entityId}`,
-        Date.now(),
-      );
-      raw()
-        .prepare("DELETE FROM retry_titles WHERE identity=?")
-        .run(`${identity.source}:${identity.entityId}`);
-    } else if (blocker === "orphan-quarantine")
-      raw()
-        .prepare("INSERT INTO quarantines VALUES(?,?,?,?,?,?,?)")
-        .run(
-          `legacy-${op.id}`,
-          scan.path,
-          "/unused",
-          "{}",
-          "needs-attention",
-          "fixture",
-          null,
-        );
-    else
-      raw()
-        .prepare(
-          "INSERT INTO operation_steps(operation_id,step,result,created_at) VALUES(?,?,?,?)",
-        )
-        .run(op.id, blocker, "{}", "fixture");
-    const stored = raw()
-      .prepare("SELECT * FROM operations WHERE id=?")
-      .get(op.id) as RetryOperation;
-    expect(preMutationRetryProof(stored)).toBe(false);
-    expect(() => requireManualAdmission()).toThrow("only one item");
-  });
+  await fix(data);
+  expect(mutations(calls)).toHaveLength(0);
+  const op = operation(data.identity.fileId);
+  expect(markers(op.id)).not.toContain("arr-delete-intent");
+  expect(
+    await readFile(quarantine(op.quarantine_id!)!.quarantine_path),
+  ).toEqual(await readFile(data.scan.path + ".old"));
 });
