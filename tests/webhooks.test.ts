@@ -1,10 +1,19 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { rotateWebhookToken, receiveWebhook } from "../src/lib/webhooks";
-import { raw, addMapping, listScans, jobQueue } from "../src/lib/store";
+import {
+  raw,
+  addMapping,
+  listScans,
+  jobQueue,
+  saveIntegration,
+} from "../src/lib/store";
 import { executeJob } from "../src/lib/worker";
 import { runProcess } from "../src/lib/process";
+import { encryptSecret } from "../src/lib/crypto";
+import * as transport from "../src/lib/arr-transport";
+afterEach(() => vi.restoreAllMocks());
 const token = rotateWebhookToken("radarr");
 const event = {
   eventType: "Download",
@@ -68,6 +77,34 @@ describe("authenticated import processing", () => {
       mediaType: "movies",
       enabled: true,
     });
+    saveIntegration(
+      "radarr",
+      true,
+      "http://radarr-fixture.test",
+      encryptSecret("fixture-key"),
+    );
+    const currentFile = {
+      ...event.movieFile,
+      movieId: event.movie.id,
+      languages: [{ id: 1, name: "English" }],
+    };
+    const reads = vi
+      .spyOn(transport, "arrTransport")
+      .mockImplementation(async (url, key, method) => {
+        expect(method).toBe("GET");
+        expect(key).toBe("fixture-key");
+        expect(url.origin).toBe("http://radarr-fixture.test");
+        if (url.pathname === "/api/v3/moviefile/456" && !url.search)
+          return currentFile;
+        if (
+          url.pathname === "/api/v3/moviefile" &&
+          url.search === "?movieId=123"
+        )
+          return [currentFile];
+        throw new Error(
+          `Unexpected fixture request: ${method} ${url.pathname}${url.search}`,
+        );
+      });
     const first = await (await receiveWebhook("radarr", request(event))).json();
     expect(first.queued).toBe(true);
     const replay = await (
@@ -86,7 +123,19 @@ describe("authenticated import processing", () => {
     const job = jobQueue.claim()!;
     await executeJob(job, new AbortController().signal);
     jobQueue.finish(job, "completed");
-    expect(listScans()[0]).toMatchObject({ path: file, decision: "pass" });
+    expect(reads).toHaveBeenCalled();
+    expect(listScans()[0]).toMatchObject({
+      path: file,
+      decision: "pass",
+      tracks: [expect.objectContaining({ language: "eng" })],
+      arrFileEvidence: {
+        source: "radarr",
+        entityId: 123,
+        fileId: 456,
+        arrPath: event.movieFile.path,
+        languages: ["English"],
+      },
+    });
     expect(
       JSON.stringify(raw().prepare("SELECT * FROM events").all()),
     ).not.toContain(token);
